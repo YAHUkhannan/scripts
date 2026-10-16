@@ -590,6 +590,31 @@ local function onNamecall(self, ...)
         if #list > 5 then
             table.remove(list, 1)
         end
+        if self.Name == "CheckShot" or self.Name == "ProjectileFinished" then
+            local argc = select("#", ...)
+            local bits = {}
+            for i = 1, math.min(argc, 8) do
+                local v = select(i, ...)
+                local kind = typeof(v)
+                if kind == "Vector3" then
+                    bits[i] = string.format("%d:%.0f %.0f %.0f", i, v.X, v.Y, v.Z)
+                elseif kind == "CFrame" then
+                    local look = v.LookVector
+                    bits[i] = string.format("%d:cf %.2f %.2f %.2f", i, look.X, look.Y, look.Z)
+                elseif kind == "number" then
+                    bits[i] = string.format("%d:%g", i, v)
+                elseif kind == "string" then
+                    bits[i] = i .. ":" .. string.sub(v, 1, 18)
+                elseif kind == "Instance" then
+                    bits[i] = i .. ":" .. v.ClassName
+                elseif kind == "boolean" then
+                    bits[i] = i .. ":" .. (v and "T" or "F")
+                else
+                    bits[i] = i .. ":" .. kind
+                end
+            end
+            pushLog(self.Name .. " " .. table.concat(bits, " "))
+        end
     end
 
     if method == "Raycast" then
