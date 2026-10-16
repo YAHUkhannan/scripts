@@ -134,6 +134,26 @@ MainStroke.Color = WHITE
 MainStroke.Thickness = 1
 MainStroke.Transparency = 0.25
 
+local LiveLog = Instance.new("TextLabel")
+LiveLog.Name = "SilentLog"
+LiveLog.AnchorPoint = Vector2.new(1, 0)
+LiveLog.Position = UDim2.new(1, -16, 0, 108)
+LiveLog.Size = UDim2.fromOffset(220, 44)
+LiveLog.BackgroundColor3 = BLACK
+LiveLog.BackgroundTransparency = 0.15
+LiveLog.BorderSizePixel = 0
+LiveLog.Font = FONT
+LiveLog.TextSize = 14
+LiveLog.TextXAlignment = Enum.TextXAlignment.Right
+LiveLog.TextYAlignment = Enum.TextYAlignment.Center
+LiveLog.TextWrapped = true
+LiveLog.TextColor3 = WHITE
+LiveLog.TextStrokeTransparency = 1
+LiveLog.Text = "LOG ON"
+LiveLog.ZIndex = 30
+LiveLog.Active = false
+LiveLog.Parent = sg
+
 local MenuFrame = Instance.new("Frame")
 MenuFrame.Name = "SilentMenu"
 MenuFrame.Size = UDim2.fromOffset(MENU_W, MENU_H)
@@ -692,8 +712,12 @@ local function flushLogs()
         local line = q[i]
         print("[Silent] " .. line)
         local sent = postLog(line)
+        local shown = (sent and "sent " or "local ") .. line
         if LogLabel then
-            LogLabel.Text = (sent and "sent " or "local ") .. line
+            LogLabel.Text = shown
+        end
+        if LiveLog then
+            LiveLog.Text = shown
         end
     end
 end
