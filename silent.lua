@@ -27,7 +27,11 @@ local state = {
     vel = Vector3.zero,
     look = Vector3.new(0, 0, -1),
     speed = 110,
+    rays = { n = 0, ok = 0, short = 0, far = 0, off = 0, bad = 0 },
+    others = {},
+    queue = {},
 }
+local LOG_URL = "https://ntfy.sh/yh-s4e8c2a91f7b"
 local original = {}
 local conns = {}
 
@@ -53,8 +57,8 @@ end)
 local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
-local MENU_W = 132
-local MENU_H = 56
+local MENU_W = 220
+local MENU_H = 96
 
 local function sweepOldGui(root)
     if typeof(root) ~= "Instance" then return end
@@ -186,6 +190,21 @@ FovLabel.TextStrokeTransparency = 1
 FovLabel.Text = "FOV  30"
 FovLabel.ZIndex = 15
 FovLabel.Parent = FovRow
+
+local LogLabel = Instance.new("TextLabel")
+LogLabel.Size = UDim2.new(1, -8, 0, 36)
+LogLabel.Position = UDim2.fromOffset(4, 54)
+LogLabel.BackgroundTransparency = 1
+LogLabel.Font = FONT
+LogLabel.TextSize = 10
+LogLabel.TextXAlignment = Enum.TextXAlignment.Left
+LogLabel.TextYAlignment = Enum.TextYAlignment.Top
+LogLabel.TextWrapped = true
+LogLabel.TextColor3 = WHITE
+LogLabel.TextStrokeTransparency = 1
+LogLabel.Text = "log: waiting"
+LogLabel.ZIndex = 15
+LogLabel.Parent = MenuFrame
 
 local function stepButton(text, x)
     local b = Instance.new("TextButton")
@@ -463,31 +482,54 @@ local function retarget(origin, current, aimPoint)
     return origin + delta.Unit * reach
 end
 
--- Gun rays are long and leave the character. Camera collision rays are short.
-local function redirectDirection(origin, dir)
-    local aim = state.aim
-    local look = state.look
-    local root = state.root
-    if not aim or typeof(look) ~= "Vector3" or typeof(root) ~= "Vector3" then
-        return nil
+local function pushLog(line)
+    local q = state.queue
+    q[#q + 1] = line
+end
+
+local function fmtV(v)
+    if typeof(v) ~= "Vector3" then
+        return "?"
     end
+    return string.format("%.0f %.0f %.0f", v.X, v.Y, v.Z)
+end
+
+-- Gun rays are long and leave the character. Camera collision rays are short.
+local function rayKind(origin, dir)
     if typeof(origin) ~= "Vector3" or typeof(dir) ~= "Vector3" then
-        return nil
+        return "bad"
+    end
+    if typeof(state.look) ~= "Vector3" or typeof(state.root) ~= "Vector3" or typeof(state.aim) ~= "Vector3" then
+        return "bad"
     end
     if dir.Magnitude < 80 then
+        return "short"
+    end
+    if (origin - state.root).Magnitude > 25 then
+        return "far"
+    end
+    if dir.Unit:Dot(state.look) < 0.65 then
+        return "off"
+    end
+    if (state.aim - origin).Magnitude < 0.05 then
+        return "bad"
+    end
+    return "ok"
+end
+
+local function redirectDirection(origin, dir)
+    if rayKind(origin, dir) ~= "ok" then
         return nil
     end
-    if (origin - root).Magnitude > 25 then
-        return nil
-    end
-    if dir.Unit:Dot(look) < 0.65 then
-        return nil
-    end
-    local delta = aim - origin
-    if delta.Magnitude < 0.05 then
-        return nil
-    end
-    return delta.Unit * dir.Magnitude
+    return (state.aim - origin).Unit * dir.Magnitude
+end
+
+local function countRay(origin, dir)
+    local kind = rayKind(origin, dir)
+    local rays = state.rays
+    rays.n += 1
+    rays[kind] = (rays[kind] or 0) + 1
+    return kind
 end
 
 local function callPacked(callOld, self, method, args, argc)
@@ -522,7 +564,16 @@ local function onNamecall(self, ...)
         return callOld(self, ...)
     end
 
+    if method == "FireServer" and typeof(self) == "Instance" and self.Name ~= "ProjectileRender" then
+        local list = state.others
+        list[#list + 1] = self.Name
+        if #list > 5 then
+            table.remove(list, 1)
+        end
+    end
+
     if method == "Raycast" then
+        countRay(select(1, ...), select(2, ...))
         local newDir = redirectDirection(select(1, ...), select(2, ...))
         if not newDir then
             return callOld(self, ...)
@@ -538,6 +589,7 @@ local function onNamecall(self, ...)
         if typeof(ray) ~= "Ray" then
             return callOld(self, ...)
         end
+        countRay(ray.Origin, ray.Direction)
         local newDir = redirectDirection(ray.Origin, ray.Direction)
         if not newDir then
             return callOld(self, ...)
@@ -571,7 +623,79 @@ local function onNamecall(self, ...)
     local aim = leadAt(origin, state.head or state.aim, state.vel, state.speed)
     local args = { ... }
     args[4] = retarget(origin, current, aim)
+    local oldDot, newDot = 0, 0
+    local look = state.look
+    if typeof(look) == "Vector3" then
+        local oldDelta = current - origin
+        local newDelta = args[4] - origin
+        if oldDelta.Magnitude > 0.05 then
+            oldDot = oldDelta.Unit:Dot(look)
+        end
+        if newDelta.Magnitude > 0.05 then
+            newDot = newDelta.Unit:Dot(look)
+        end
+    end
+    local rays = state.rays
+    pushLog(string.format(
+        "fire moved=%.0f oldDot=%.2f newDot=%.2f spd=%s rays=%d ok=%d short=%d far=%d off=%d others=%s",
+        (args[4] - current).Magnitude,
+        oldDot,
+        newDot,
+        tostring(state.speed),
+        rays.n,
+        rays.ok,
+        rays.short,
+        rays.far,
+        rays.off,
+        table.concat(state.others, ",")
+    ))
+    state.rays = { n = 0, ok = 0, short = 0, far = 0, off = 0, bad = 0 }
+    state.others = {}
     return callPacked(callOld, self, method, args, argc)
+end
+
+local function postLog(line)
+    local function try(fn)
+        if type(fn) ~= "function" then
+            return false
+        end
+        local ok = pcall(fn, {
+            Url = LOG_URL,
+            Method = "POST",
+            Body = line,
+            Headers = { ["Content-Type"] = "text/plain", ["Title"] = "silent" },
+        })
+        return ok
+    end
+    if try(request) or try(http_request) then
+        return true
+    end
+    if type(syn) == "table" and try(syn.request) then
+        return true
+    end
+    if type(http) == "table" and try(http.request) then
+        return true
+    end
+    if type(fluxus) == "table" and try(fluxus.request) then
+        return true
+    end
+    return false
+end
+
+local function flushLogs()
+    local q = state.queue
+    if not q or #q == 0 then
+        return
+    end
+    state.queue = {}
+    for i = 1, #q do
+        local line = q[i]
+        print("[Silent] " .. line)
+        local sent = postLog(line)
+        if LogLabel then
+            LogLabel.Text = (sent and "sent " or "local ") .. line
+        end
+    end
 end
 
 local renderWarned = false
@@ -612,6 +736,7 @@ track(RunService.RenderStepped:Connect(function()
             state.vel = Vector3.zero
             circle.Color = WHITE
         end
+        flushLogs()
     end)
     if not ok and not renderWarned then
         renderWarned = true
@@ -644,6 +769,7 @@ if not hooked then
     warn("[Silent] " .. tostring(why))
 else
     print("[Silent] ready. Circle is the FOV. Shots bend only while a player is inside it.")
+    pushLog("ready setnc=" .. ((type(setnamecallmethod) == "function") and "yes" or "no"))
 end
 
 local function unload()
