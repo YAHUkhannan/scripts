@@ -27,11 +27,7 @@ local state = {
     vel = Vector3.zero,
     look = Vector3.new(0, 0, -1),
     speed = 110,
-    rays = { n = 0, ok = 0, short = 0, far = 0, off = 0, bad = 0 },
-    others = {},
-    queue = {},
 }
-local LOG_URL = "https://ntfy.sh/yh-s4e8c2a91f7b"
 local original = {}
 local conns = {}
 
@@ -57,8 +53,8 @@ end)
 local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
-local MENU_W = 220
-local MENU_H = 96
+local MENU_W = 132
+local MENU_H = 56
 
 local function sweepOldGui(root)
     if typeof(root) ~= "Instance" then return end
@@ -134,26 +130,6 @@ MainStroke.Color = WHITE
 MainStroke.Thickness = 1
 MainStroke.Transparency = 0.25
 
-local LiveLog = Instance.new("TextLabel")
-LiveLog.Name = "SilentLog"
-LiveLog.AnchorPoint = Vector2.new(1, 0)
-LiveLog.Position = UDim2.new(1, -16, 0, 108)
-LiveLog.Size = UDim2.fromOffset(220, 44)
-LiveLog.BackgroundColor3 = BLACK
-LiveLog.BackgroundTransparency = 0.15
-LiveLog.BorderSizePixel = 0
-LiveLog.Font = FONT
-LiveLog.TextSize = 14
-LiveLog.TextXAlignment = Enum.TextXAlignment.Right
-LiveLog.TextYAlignment = Enum.TextYAlignment.Center
-LiveLog.TextWrapped = true
-LiveLog.TextColor3 = WHITE
-LiveLog.TextStrokeTransparency = 1
-LiveLog.Text = "LOG ON"
-LiveLog.ZIndex = 30
-LiveLog.Active = false
-LiveLog.Parent = sg
-
 local MenuFrame = Instance.new("Frame")
 MenuFrame.Name = "SilentMenu"
 MenuFrame.Size = UDim2.fromOffset(MENU_W, MENU_H)
@@ -210,21 +186,6 @@ FovLabel.TextStrokeTransparency = 1
 FovLabel.Text = "FOV  30"
 FovLabel.ZIndex = 15
 FovLabel.Parent = FovRow
-
-local LogLabel = Instance.new("TextLabel")
-LogLabel.Size = UDim2.new(1, -8, 0, 36)
-LogLabel.Position = UDim2.fromOffset(4, 54)
-LogLabel.BackgroundTransparency = 1
-LogLabel.Font = FONT
-LogLabel.TextSize = 10
-LogLabel.TextXAlignment = Enum.TextXAlignment.Left
-LogLabel.TextYAlignment = Enum.TextYAlignment.Top
-LogLabel.TextWrapped = true
-LogLabel.TextColor3 = WHITE
-LogLabel.TextStrokeTransparency = 1
-LogLabel.Text = "log: waiting"
-LogLabel.ZIndex = 15
-LogLabel.Parent = MenuFrame
 
 local function stepButton(text, x)
     local b = Instance.new("TextButton")
@@ -465,8 +426,8 @@ local function bestTarget(cam, radius)
     return bestPart
 end
 
--- 110 is the speed value the AK sent with every shot. The bullet aims where
--- the head will be after flying that long, then again with the real muzzle.
+-- Each gun sends its bullet speed on ProjectileRender. Aim where the head
+-- will be when a bullet at that speed arrives.
 local function leadAt(origin, head, vel, speed)
     if typeof(head) ~= "Vector3" or typeof(origin) ~= "Vector3" then
         return head
@@ -483,73 +444,6 @@ local function leadAt(origin, head, vel, speed)
         point = head + vel * time
     end
     return point
-end
-
--- Arg 3 is the muzzle. Arg 4 is the world point the bullet flies toward,
--- about 800 studs out on the AK. Keep that length, but point it at the head.
-local function retarget(origin, current, aimPoint)
-    local delta = aimPoint - origin
-    if delta.Magnitude < 0.05 then
-        return current
-    end
-    local reach = (current - origin).Magnitude
-    if reach < 5 then
-        reach = current.Magnitude
-    end
-    if delta.Magnitude > reach then
-        reach = delta.Magnitude
-    end
-    return origin + delta.Unit * reach
-end
-
-local function pushLog(line)
-    local q = state.queue
-    q[#q + 1] = line
-end
-
-local function fmtV(v)
-    if typeof(v) ~= "Vector3" then
-        return "?"
-    end
-    return string.format("%.0f %.0f %.0f", v.X, v.Y, v.Z)
-end
-
--- Gun rays are long and leave the character. Camera collision rays are short.
-local function rayKind(origin, dir)
-    if typeof(origin) ~= "Vector3" or typeof(dir) ~= "Vector3" then
-        return "bad"
-    end
-    if typeof(state.look) ~= "Vector3" or typeof(state.root) ~= "Vector3" or typeof(state.aim) ~= "Vector3" then
-        return "bad"
-    end
-    if dir.Magnitude < 80 then
-        return "short"
-    end
-    if (origin - state.root).Magnitude > 25 then
-        return "far"
-    end
-    if dir.Unit:Dot(state.look) < 0.65 then
-        return "off"
-    end
-    if (state.aim - origin).Magnitude < 0.05 then
-        return "bad"
-    end
-    return "ok"
-end
-
-local function redirectDirection(origin, dir)
-    if rayKind(origin, dir) ~= "ok" then
-        return nil
-    end
-    return (state.aim - origin).Unit * dir.Magnitude
-end
-
-local function countRay(origin, dir)
-    local kind = rayKind(origin, dir)
-    local rays = state.rays
-    rays.n += 1
-    rays[kind] = (rays[kind] or 0) + 1
-    return kind
 end
 
 local function callPacked(callOld, self, method, args, argc)
@@ -572,197 +466,43 @@ local function callPacked(callOld, self, method, args, argc)
     return callOld(self, table.unpack(args, 1, argc))
 end
 
--- The aim point is chosen on the frame thread. The shot hook must not call any
--- methods, or the gun script errors on the first shot and stays dead until respawn.
+-- CheckShot is the hit report. The bullet graphic still follows the crosshair.
+-- The hook must not call any methods, or the gun script dies until respawn.
 local function onNamecall(self, ...)
     local method = getnamecallmethod()
     local callOld = original[1]
     if not callOld then
         return
     end
-    if not state.running or not state.enabled or not state.aim then
+    if not state.running or not state.enabled or method ~= "FireServer" or typeof(self) ~= "Instance" then
         return callOld(self, ...)
     end
-
-    if method == "FireServer" and typeof(self) == "Instance" and self.Name ~= "ProjectileRender" then
-        local list = state.others
-        list[#list + 1] = self.Name
-        if #list > 5 then
-            table.remove(list, 1)
+    local name = self.Name
+    if name == "ProjectileRender" then
+        local speed = select(5, ...)
+        if typeof(speed) == "number" and speed >= 30 and speed <= 5000 then
+            state.speed = speed
         end
-        if self.Name == "CheckShot" then
-            local argc = select("#", ...)
-            local cf = select(5, ...)
-            local aimPart = state.part
-            local aimPos = state.head
-            local origin = state.root
-            if argc >= 7 and typeof(cf) == "CFrame" and typeof(aimPart) == "Instance" and typeof(aimPos) == "Vector3" and typeof(origin) == "Vector3" then
-                local delta = aimPos - origin
-                if delta.Magnitude > 0.05 then
-                    local args = { ... }
-                    args[5] = CFrame.new(origin, aimPos)
-                    args[6] = aimPos
-                    args[7] = aimPart
-                    pushLog("check aimed " .. aimPart.Name)
-                    return callPacked(callOld, self, method, args, argc)
-                end
-            end
-        end
-        if self.Name == "CheckShot" or self.Name == "ProjectileFinished" then
-            local argc = select("#", ...)
-            local bits = {}
-            for i = 1, math.min(argc, 8) do
-                local v = select(i, ...)
-                local kind = typeof(v)
-                if kind == "Vector3" then
-                    bits[i] = string.format("%d:%.0f %.0f %.0f", i, v.X, v.Y, v.Z)
-                elseif kind == "CFrame" then
-                    local look = v.LookVector
-                    bits[i] = string.format("%d:cf %.2f %.2f %.2f", i, look.X, look.Y, look.Z)
-                elseif kind == "number" then
-                    bits[i] = string.format("%d:%g", i, v)
-                elseif kind == "string" then
-                    bits[i] = i .. ":" .. string.sub(v, 1, 18)
-                elseif kind == "Instance" then
-                    bits[i] = i .. ":" .. v.ClassName
-                elseif kind == "boolean" then
-                    bits[i] = i .. ":" .. (v and "T" or "F")
-                else
-                    bits[i] = i .. ":" .. kind
-                end
-            end
-            pushLog(self.Name .. " " .. table.concat(bits, " "))
-        end
-    end
-
-    if method == "Raycast" then
-        countRay(select(1, ...), select(2, ...))
-        local newDir = redirectDirection(select(1, ...), select(2, ...))
-        if not newDir then
-            return callOld(self, ...)
-        end
-        local argc = select("#", ...)
-        local args = { ... }
-        args[2] = newDir
-        return callPacked(callOld, self, method, args, argc)
-    end
-
-    if method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
-        local ray = select(1, ...)
-        if typeof(ray) ~= "Ray" then
-            return callOld(self, ...)
-        end
-        countRay(ray.Origin, ray.Direction)
-        local newDir = redirectDirection(ray.Origin, ray.Direction)
-        if not newDir then
-            return callOld(self, ...)
-        end
-        local argc = select("#", ...)
-        local args = { ... }
-        args[1] = Ray.new(ray.Origin, newDir)
-        return callPacked(callOld, self, method, args, argc)
-    end
-
-    if method ~= "FireServer" then
         return callOld(self, ...)
     end
-    if typeof(self) ~= "Instance" or self.Name ~= "ProjectileRender" then
-        return callOld(self, ...)
-    end
-    local className = self.ClassName
-    if className ~= "RemoteEvent" and className ~= "UnreliableRemoteEvent" then
+    if name ~= "CheckShot" or not state.part or not state.head or typeof(state.eye) ~= "Vector3" then
         return callOld(self, ...)
     end
     local argc = select("#", ...)
-    local origin = select(3, ...)
-    local current = select(4, ...)
-    if argc < 4 or typeof(origin) ~= "Vector3" or typeof(current) ~= "Vector3" then
+    local cf = select(5, ...)
+    if argc < 7 or typeof(cf) ~= "CFrame" then
         return callOld(self, ...)
     end
-    local speed = select(5, ...)
-    if typeof(speed) == "number" and speed >= 30 and speed <= 5000 then
-        state.speed = speed
+    local origin = state.eye
+    local aimPos = leadAt(origin, state.head, state.vel, state.speed)
+    if typeof(aimPos) ~= "Vector3" or (aimPos - origin).Magnitude < 0.05 then
+        return callOld(self, ...)
     end
-    local aim = leadAt(origin, state.head or state.aim, state.vel, state.speed)
     local args = { ... }
-    args[4] = retarget(origin, current, aim)
-    local oldDot, newDot = 0, 0
-    local look = state.look
-    if typeof(look) == "Vector3" then
-        local oldDelta = current - origin
-        local newDelta = args[4] - origin
-        if oldDelta.Magnitude > 0.05 then
-            oldDot = oldDelta.Unit:Dot(look)
-        end
-        if newDelta.Magnitude > 0.05 then
-            newDot = newDelta.Unit:Dot(look)
-        end
-    end
-    local rays = state.rays
-    pushLog(string.format(
-        "fire moved=%.0f oldDot=%.2f newDot=%.2f spd=%s rays=%d ok=%d short=%d far=%d off=%d others=%s",
-        (args[4] - current).Magnitude,
-        oldDot,
-        newDot,
-        tostring(state.speed),
-        rays.n,
-        rays.ok,
-        rays.short,
-        rays.far,
-        rays.off,
-        table.concat(state.others, ",")
-    ))
-    state.rays = { n = 0, ok = 0, short = 0, far = 0, off = 0, bad = 0 }
-    state.others = {}
+    args[5] = CFrame.new(origin, aimPos)
+    args[6] = aimPos
+    args[7] = state.part
     return callPacked(callOld, self, method, args, argc)
-end
-
-local function postLog(line)
-    local function try(fn)
-        if type(fn) ~= "function" then
-            return false
-        end
-        local ok = pcall(fn, {
-            Url = LOG_URL,
-            Method = "POST",
-            Body = line,
-            Headers = { ["Content-Type"] = "text/plain", ["Title"] = "silent" },
-        })
-        return ok
-    end
-    if try(request) or try(http_request) then
-        return true
-    end
-    if type(syn) == "table" and try(syn.request) then
-        return true
-    end
-    if type(http) == "table" and try(http.request) then
-        return true
-    end
-    if type(fluxus) == "table" and try(fluxus.request) then
-        return true
-    end
-    return false
-end
-
-local function flushLogs()
-    local q = state.queue
-    if not q or #q == 0 then
-        return
-    end
-    state.queue = {}
-    for i = 1, #q do
-        local line = q[i]
-        print("[Silent] " .. line)
-        local sent = postLog(line)
-        local shown = (sent and "sent " or "local ") .. line
-        if LogLabel then
-            LogLabel.Text = shown
-        end
-        if LiveLog then
-            LiveLog.Text = shown
-        end
-    end
 end
 
 local renderWarned = false
@@ -788,6 +528,8 @@ track(RunService.RenderStepped:Connect(function()
         state.look = cam.CFrame.LookVector
         local myChar = LocalPlayer.Character
         local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        local myHead = myChar and myChar:FindFirstChild("Head")
+        state.eye = (myHead and myHead.Position) or cam.CFrame.Position
         state.root = myRoot and myRoot.Position or nil
         local part = bestTarget(cam, radius)
         if part then
@@ -806,7 +548,6 @@ track(RunService.RenderStepped:Connect(function()
             state.vel = Vector3.zero
             circle.Color = WHITE
         end
-        flushLogs()
     end)
     if not ok and not renderWarned then
         renderWarned = true
@@ -838,8 +579,7 @@ if not hooked then
     MainBtn.Text = "NO"
     warn("[Silent] " .. tostring(why))
 else
-    print("[Silent] ready. Circle is the FOV. Shots bend only while a player is inside it.")
-    pushLog("ready setnc=" .. ((type(setnamecallmethod) == "function") and "yes" or "no"))
+    print("[Silent] ready. Circle is the FOV. Shots count only while a player is inside it.")
 end
 
 local function unload()
