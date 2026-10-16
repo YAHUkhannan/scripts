@@ -424,52 +424,61 @@ local function bestTarget(cam, radius)
     return bestPart
 end
 
--- Arg 3 is the muzzle. Arg 4 is the aim value, about 900 studs long on the AK.
--- It either points along the camera, or the line from the muzzle to it does.
--- Keep whichever one matches the camera, and aim that at the head.
-local function retarget(origin, current, aimPoint, look)
+-- Arg 3 is the muzzle. Arg 4 is the world point the bullet flies toward,
+-- about 800 studs out on the AK. Keep that length, but point it at the head.
+local function retarget(origin, current, aimPoint)
     local delta = aimPoint - origin
     if delta.Magnitude < 0.05 then
         return current
     end
-    local dirScore = -1
-    if current.Magnitude > 0.05 then
-        dirScore = current.Unit:Dot(look)
+    local reach = (current - origin).Magnitude
+    if reach < 5 then
+        reach = current.Magnitude
     end
-    local fromOrigin = current - origin
-    local pointScore = -1
-    if fromOrigin.Magnitude > 0.05 then
-        pointScore = fromOrigin.Unit:Dot(look)
+    if delta.Magnitude > reach then
+        reach = delta.Magnitude
     end
-    if pointScore > dirScore then
-        return origin + delta.Unit * fromOrigin.Magnitude
-    end
-    local mag = current.Magnitude
-    if mag < 0.05 then
-        mag = delta.Magnitude
-    end
-    return delta.Unit * mag
+    return origin + delta.Unit * reach
 end
 
--- The aim point is chosen on the frame thread. The shot hook must not call any
--- methods, or the gun script errors on the first shot and stays dead until respawn.
-local function leadPoint(origin, aim, vel, speed)
-    if typeof(speed) ~= "number" or speed < 30 or speed > 5000 then
-        return aim
+-- Gun rays are long and leave the character. Camera collision rays are short.
+local function redirectDirection(origin, dir)
+    local aim = state.aim
+    local look = state.look
+    local root = state.root
+    if not aim or typeof(look) ~= "Vector3" or typeof(root) ~= "Vector3" then
+        return nil
     end
-    if typeof(vel) ~= "Vector3" then
-        return aim
+    if typeof(origin) ~= "Vector3" or typeof(dir) ~= "Vector3" then
+        return nil
     end
-    local dist = (aim - origin).Magnitude
-    local time = math.clamp(dist / speed, 0, 1.25)
-    return aim + vel * time
+    if dir.Magnitude < 80 then
+        return nil
+    end
+    if (origin - root).Magnitude > 25 then
+        return nil
+    end
+    if dir.Unit:Dot(look) < 0.65 then
+        return nil
+    end
+    local delta = aim - origin
+    if delta.Magnitude < 0.05 then
+        return nil
+    end
+    return delta.Unit * dir.Magnitude
 end
 
 local function callPacked(callOld, self, method, args, argc)
     if type(setnamecallmethod) == "function" then
         setnamecallmethod(method)
     end
-    if argc == 8 then
+    if argc == 2 then
+        return callOld(self, args[1], args[2])
+    elseif argc == 3 then
+        return callOld(self, args[1], args[2], args[3])
+    elseif argc == 4 then
+        return callOld(self, args[1], args[2], args[3], args[4])
+    elseif argc == 8 then
         return callOld(self, args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
     elseif argc == 9 then
         return callOld(self, args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
@@ -479,14 +488,45 @@ local function callPacked(callOld, self, method, args, argc)
     return callOld(self, table.unpack(args, 1, argc))
 end
 
-local shotWarned = false
+-- The aim point is chosen on the frame thread. The shot hook must not call any
+-- methods, or the gun script errors on the first shot and stays dead until respawn.
 local function onNamecall(self, ...)
     local method = getnamecallmethod()
     local callOld = original[1]
     if not callOld then
         return
     end
-    if method ~= "FireServer" or not state.running or not state.enabled or not state.aim then
+    if not state.running or not state.enabled or not state.aim then
+        return callOld(self, ...)
+    end
+
+    if method == "Raycast" then
+        local newDir = redirectDirection(select(1, ...), select(2, ...))
+        if not newDir then
+            return callOld(self, ...)
+        end
+        local argc = select("#", ...)
+        local args = { ... }
+        args[2] = newDir
+        return callPacked(callOld, self, method, args, argc)
+    end
+
+    if method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+        local ray = select(1, ...)
+        if typeof(ray) ~= "Ray" then
+            return callOld(self, ...)
+        end
+        local newDir = redirectDirection(ray.Origin, ray.Direction)
+        if not newDir then
+            return callOld(self, ...)
+        end
+        local argc = select("#", ...)
+        local args = { ... }
+        args[1] = Ray.new(ray.Origin, newDir)
+        return callPacked(callOld, self, method, args, argc)
+    end
+
+    if method ~= "FireServer" then
         return callOld(self, ...)
     end
     if typeof(self) ~= "Instance" or self.Name ~= "ProjectileRender" then
@@ -499,24 +539,12 @@ local function onNamecall(self, ...)
     local argc = select("#", ...)
     local origin = select(3, ...)
     local current = select(4, ...)
-    if argc < 4 or typeof(origin) ~= "Vector3" or typeof(current) ~= "Vector3" or typeof(state.look) ~= "Vector3" then
+    if argc < 4 or typeof(origin) ~= "Vector3" or typeof(current) ~= "Vector3" then
         return callOld(self, ...)
     end
-    local aim = leadPoint(origin, state.aim, state.vel, select(5, ...))
     local args = { ... }
-    args[4] = retarget(origin, current, aim, state.look)
-    local ok = pcall(callPacked, callOld, self, method, args, argc)
-    if ok then
-        return
-    end
-    if not shotWarned then
-        shotWarned = true
-        warn("[Silent] redirected shot failed, sent the original")
-    end
-    if type(setnamecallmethod) == "function" then
-        setnamecallmethod(method)
-    end
-    return callOld(self, ...)
+    args[4] = retarget(origin, current, state.aim)
+    return callPacked(callOld, self, method, args, argc)
 end
 
 local renderWarned = false
@@ -540,6 +568,9 @@ track(RunService.RenderStepped:Connect(function()
         circle.Radius = radius
         circle.Visible = true
         state.look = cam.CFrame.LookVector
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        state.root = myRoot and myRoot.Position or nil
         local part = bestTarget(cam, radius)
         if part then
             state.aim = part.Position
