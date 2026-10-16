@@ -590,6 +590,24 @@ local function onNamecall(self, ...)
         if #list > 5 then
             table.remove(list, 1)
         end
+        if self.Name == "CheckShot" then
+            local argc = select("#", ...)
+            local cf = select(5, ...)
+            local aimPart = state.part
+            local aimPos = state.head
+            local origin = state.root
+            if argc >= 7 and typeof(cf) == "CFrame" and typeof(aimPart) == "Instance" and typeof(aimPos) == "Vector3" and typeof(origin) == "Vector3" then
+                local delta = aimPos - origin
+                if delta.Magnitude > 0.05 then
+                    local args = { ... }
+                    args[5] = CFrame.new(origin, aimPos)
+                    args[6] = aimPos
+                    args[7] = aimPart
+                    pushLog("check aimed " .. aimPart.Name)
+                    return callPacked(callOld, self, method, args, argc)
+                end
+            end
+        end
         if self.Name == "CheckShot" or self.Name == "ProjectileFinished" then
             local argc = select("#", ...)
             local bits = {}
@@ -773,6 +791,7 @@ track(RunService.RenderStepped:Connect(function()
         state.root = myRoot and myRoot.Position or nil
         local part = bestTarget(cam, radius)
         if part then
+            state.part = part
             state.head = part.Position
             local model = part.Parent
             local hrp = model and model:FindFirstChild("HumanoidRootPart")
@@ -782,6 +801,8 @@ track(RunService.RenderStepped:Connect(function()
             circle.Color = Color3.fromRGB(80, 255, 120)
         else
             state.aim = nil
+            state.part = nil
+            state.head = nil
             state.vel = Vector3.zero
             circle.Color = WHITE
         end
