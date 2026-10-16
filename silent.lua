@@ -23,8 +23,10 @@ local state = {
     enabled = true,
     fov = 30,
     aim = nil,
+    head = nil,
     vel = Vector3.zero,
     look = Vector3.new(0, 0, -1),
+    speed = 110,
 }
 local original = {}
 local conns = {}
@@ -424,6 +426,26 @@ local function bestTarget(cam, radius)
     return bestPart
 end
 
+-- 110 is the speed value the AK sent with every shot. The bullet aims where
+-- the head will be after flying that long, then again with the real muzzle.
+local function leadAt(origin, head, vel, speed)
+    if typeof(head) ~= "Vector3" or typeof(origin) ~= "Vector3" then
+        return head
+    end
+    if typeof(vel) ~= "Vector3" then
+        vel = Vector3.zero
+    end
+    if typeof(speed) ~= "number" or speed < 30 or speed > 5000 then
+        speed = 110
+    end
+    local point = head
+    for _ = 1, 3 do
+        local time = math.clamp((point - origin).Magnitude / speed, 0, 2.5)
+        point = head + vel * time
+    end
+    return point
+end
+
 -- Arg 3 is the muzzle. Arg 4 is the world point the bullet flies toward,
 -- about 800 studs out on the AK. Keep that length, but point it at the head.
 local function retarget(origin, current, aimPoint)
@@ -542,8 +564,13 @@ local function onNamecall(self, ...)
     if argc < 4 or typeof(origin) ~= "Vector3" or typeof(current) ~= "Vector3" then
         return callOld(self, ...)
     end
+    local speed = select(5, ...)
+    if typeof(speed) == "number" and speed >= 30 and speed <= 5000 then
+        state.speed = speed
+    end
+    local aim = leadAt(origin, state.head or state.aim, state.vel, state.speed)
     local args = { ... }
-    args[4] = retarget(origin, current, state.aim)
+    args[4] = retarget(origin, current, aim)
     return callPacked(callOld, self, method, args, argc)
 end
 
@@ -573,10 +600,12 @@ track(RunService.RenderStepped:Connect(function()
         state.root = myRoot and myRoot.Position or nil
         local part = bestTarget(cam, radius)
         if part then
-            state.aim = part.Position
+            state.head = part.Position
             local model = part.Parent
             local hrp = model and model:FindFirstChild("HumanoidRootPart")
             state.vel = (hrp and hrp.AssemblyLinearVelocity) or Vector3.zero
+            local from = state.root or cam.CFrame.Position
+            state.aim = leadAt(from, state.head, state.vel, state.speed)
             circle.Color = Color3.fromRGB(80, 255, 120)
         else
             state.aim = nil
