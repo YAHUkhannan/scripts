@@ -1,11 +1,12 @@
 -- language: Lua, file: silent.lua, target: Roblox (mobile executor)
--- Silent aim for every gun that fires GunFramework's ProjectileRender.
+-- Silent aim for every gun that fires GunFramework's ProjectileRender. Maintenance v1.1.
 -- A shot is redirected only when a player's head is inside the FOV circle.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
+local VERSION = "1.1"
 
 local genv = _G
 pcall(function()
@@ -30,6 +31,8 @@ local state = {
 }
 local original = {}
 local conns = {}
+local namecallBridge = nil
+local circle = nil
 
 local function track(conn)
     if conn then
@@ -55,6 +58,21 @@ local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
 local MENU_W = 132
 local MENU_H = 56
+
+local function clearTarget()
+    state.aim = nil
+    state.part = nil
+    state.head = nil
+    state.eye = nil
+    state.root = nil
+    state.vel = Vector3.zero
+    if circle then
+        pcall(function()
+            circle.Visible = false
+            circle.Color = WHITE
+        end)
+    end
+end
 
 local function sweepOldGui(root)
     if typeof(root) ~= "Instance" then return end
@@ -211,7 +229,7 @@ local PlusBtn = stepButton("+", -18)
 
 local function refreshUi()
     local on = state.enabled
-    ToggleRow.Text = on and "  SILENT  ON" or "  SILENT  OFF"
+    ToggleRow.Text = "  SILENT v" .. VERSION .. (on and "  ON" or "  OFF")
     ToggleRow.BackgroundColor3 = on and WHITE or BLACK
     ToggleRow.TextColor3 = on and BLACK or WHITE
     MainBtn.Text = on and "S" or "s"
@@ -266,6 +284,7 @@ end
 
 bindPress(ToggleRow, function()
     state.enabled = not state.enabled
+    if not state.enabled then clearTarget() end
     refreshUi()
 end)
 
@@ -308,7 +327,10 @@ track(MainBtn.InputBegan:Connect(function(input)
 end))
 
 track(UserInputService.InputChanged:Connect(function(input)
-    if input ~= dragInput or not dragStart or not startPos then return end
+    if not dragInput or not dragStart or not startPos then return end
+    local isMouseMove = dragInput.UserInputType == Enum.UserInputType.MouseButton1
+        and input.UserInputType == Enum.UserInputType.MouseMovement
+    if input ~= dragInput and not isMouseMove then return end
     local here = Vector2.new(input.Position.X, input.Position.Y)
     local delta = here - dragStart
     if math.abs(delta.X) > 14 or math.abs(delta.Y) > 14 then
@@ -326,11 +348,11 @@ track(UserInputService.InputChanged:Connect(function(input)
     end
 end))
 
-local fingerStart = nil
+local pointerStarts = {}
 track(UserInputService.InputBegan:Connect(function(input)
     local kind = input.UserInputType
     if kind == Enum.UserInputType.Touch or kind == Enum.UserInputType.MouseButton1 then
-        fingerStart = Vector2.new(input.Position.X, input.Position.Y)
+        pointerStarts[input] = Vector2.new(input.Position.X, input.Position.Y)
     end
 end))
 
@@ -344,9 +366,12 @@ end
 track(UserInputService.InputEnded:Connect(function(input)
     local kind = input.UserInputType
     local isPointer = kind == Enum.UserInputType.Touch or kind == Enum.UserInputType.MouseButton1
+    local start = pointerStarts[input]
+    pointerStarts[input] = nil
+    local cancelled = input.UserInputState == Enum.UserInputState.Cancel
     if input == dragInput then
         dragInput = nil
-        if not dragMoved then
+        if not dragMoved and not cancelled then
             local now = os.clock()
             if now - lastToggle >= 0.28 then
                 lastToggle = now
@@ -354,18 +379,16 @@ track(UserInputService.InputEnded:Connect(function(input)
             end
         end
     end
-    if not isPointer or not fingerStart or not MenuFrame.Visible then
-        if isPointer then fingerStart = nil end
+    if not isPointer or not start or cancelled or not MenuFrame.Visible then
         return
     end
     local here = Vector2.new(input.Position.X, input.Position.Y)
-    local delta = here - fingerStart
-    fingerStart = nil
+    local delta = here - start
     if math.abs(delta.X) > 18 or math.abs(delta.Y) > 18 then return end
     if pointIn(MainBtn, here.X, here.Y) then return end
     local best, bestArea = nil, math.huge
     for guiObj, go in pairs(pressAt) do
-        if pointIn(guiObj, here.X, here.Y) then
+        if pointIn(guiObj, here.X, here.Y) and pointIn(guiObj, start.X, start.Y) then
             local size = guiObj.AbsoluteSize
             local area = size.X * size.Y
             if area < bestArea then
@@ -381,7 +404,6 @@ end))
 
 -- FOV ----------------------------------------------------------------------
 
-local circle = nil
 pcall(function()
     circle = Drawing.new("Circle")
     circle.Thickness = 1
@@ -510,6 +532,8 @@ track(RunService.RenderStepped:Connect(function()
     if not state.running then
         return
     end
+    -- An incomplete update must never leave the previous target usable.
+    clearTarget()
     local ok, err = pcall(function()
         local cam = camera()
         if not circle or not cam then
@@ -549,9 +573,12 @@ track(RunService.RenderStepped:Connect(function()
             circle.Color = WHITE
         end
     end)
-    if not ok and not renderWarned then
-        renderWarned = true
-        warn("[Silent] render error: " .. tostring(err))
+    if not ok then
+        clearTarget()
+        if not renderWarned then
+            renderWarned = true
+            warn("[Silent] render error: " .. tostring(err))
+        end
     end
 end))
 
@@ -559,9 +586,23 @@ local function installHook()
     if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
         return false, "executor has no hookmetamethod"
     end
-    local fn = onNamecall
+    -- Reuse one forwarding hook across reloads. Unload only detaches our handler;
+    -- restoring the global metamethod could remove another script's hook.
+    local bridge = genv.__SilentNamecallBridge
+    if type(bridge) == "table" and bridge.version == 1 and type(bridge.previous) == "function" then
+        original[1] = bridge.previous
+        bridge.handler = onNamecall
+        namecallBridge = bridge
+        return true
+    end
+    bridge = { version = 1 }
+    local function dispatch(self, ...)
+        if bridge.handler then return bridge.handler(self, ...) end
+        return bridge.previous(self, ...)
+    end
+    local fn = dispatch
     if type(newcclosure) == "function" then
-        local okWrap, wrapped = pcall(newcclosure, onNamecall)
+        local okWrap, wrapped = pcall(newcclosure, dispatch)
         if okWrap and type(wrapped) == "function" then
             fn = wrapped
         end
@@ -571,6 +612,10 @@ local function installHook()
         return false, tostring(oldOrErr)
     end
     original[1] = oldOrErr
+    bridge.previous = oldOrErr
+    bridge.handler = onNamecall
+    namecallBridge = bridge
+    genv.__SilentNamecallBridge = bridge
     return true
 end
 
@@ -579,7 +624,7 @@ if not hooked then
     MainBtn.Text = "NO"
     warn("[Silent] " .. tostring(why))
 else
-    print("[Silent] ready. Circle is the FOV. Shots count only while a player is inside it.")
+    print("[Silent v" .. VERSION .. "] ready. Circle is the FOV. Shots count only while a player is inside it.")
 end
 
 local function unload()
@@ -588,25 +633,17 @@ local function unload()
     end
     state.running = false
     state.enabled = false
+    clearTarget()
+    table.clear(pointerStarts)
+    dragInput = nil
     for _, conn in ipairs(conns) do
         pcall(function()
             conn:Disconnect()
         end)
     end
     table.clear(conns)
-    local old = original[1]
-    if old then
-        local restored = false
-        if type(restorefunction) == "function" then
-            restored = pcall(restorefunction, old)
-        end
-        if not restored and type(restoreclosure) == "function" then
-            restored = pcall(restoreclosure, old)
-        end
-        if not restored and type(hookmetamethod) == "function" then
-            pcall(hookmetamethod, game, "__namecall", old)
-        end
-        original[1] = nil
+    if namecallBridge and namecallBridge.handler == onNamecall then
+        namecallBridge.handler = nil
     end
     if circle then
         pcall(function()

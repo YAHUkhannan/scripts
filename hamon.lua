@@ -6,6 +6,7 @@ local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
+local VERSION = "1.1"
 
 if type(_G.__HamonUnload) == "function" then
     pcall(_G.__HamonUnload)
@@ -100,8 +101,10 @@ local function ReleaseAllSkeletonLines(e)
     for i = 1, e.SkeletonCount do
         ReleaseDrawing(e.SkeletonLines[i])
     end
-    e.SkeletonLines = {}
+    table.clear(e.SkeletonLines)
     e.SkeletonCount = 0
+    e.SkeletonPending = false
+    e.SkeletonColor = nil
 end
 
 local function ClearVisuals(e)
@@ -315,7 +318,7 @@ end
 -- Row presses go through one hit-test on touch end. Button.Activated is wired to
 -- the same debounce. Mobile executors often deliver only one of those.
 local pressables = {}
-local fingerStart = nil
+local pointerStarts = {}
 
 local function bindPress(guiObj, fn)
     local entry = { gui = guiObj, fn = fn, last = 0 }
@@ -392,7 +395,7 @@ local function MakeRow(text, toggleKey, cycleValues)
     end)
 end
 
-MakeRow("AIM", "Aim")
+MakeRow("AIM v" .. VERSION, "Aim")
 MakeRow("PREDICT", "Prediction")
 MakeRow("HUMANIZE", "Humanize")
 MakeRow("LOCK", "LockTarget")
@@ -543,7 +546,10 @@ Track(MainBtn.InputBegan:Connect(function(input)
 end))
 
 Track(UserInputService.InputChanged:Connect(function(input)
-    if input ~= dragInput or not dragStartPos or not startBtnPos then return end
+    if not dragInput or not dragStartPos or not startBtnPos then return end
+    local isMouseMove = dragInput.UserInputType == Enum.UserInputType.MouseButton1
+        and input.UserInputType == Enum.UserInputType.MouseMovement
+    if input ~= dragInput and not isMouseMove then return end
     local here = Vector2.new(input.Position.X, input.Position.Y)
     local delta = here - dragStartPos
     if math.abs(delta.X) > DRAG_THRESHOLD or math.abs(delta.Y) > DRAG_THRESHOLD then
@@ -564,31 +570,32 @@ Track(UserInputService.InputBegan:Connect(function(input)
     if kind ~= Enum.UserInputType.Touch and kind ~= Enum.UserInputType.MouseButton1 then
         return
     end
-    fingerStart = Vector2.new(input.Position.X, input.Position.Y)
+    pointerStarts[input] = Vector2.new(input.Position.X, input.Position.Y)
 end))
 
 Track(UserInputService.InputEnded:Connect(function(input)
     local kind = input.UserInputType
     local isPointer = kind == Enum.UserInputType.Touch or kind == Enum.UserInputType.MouseButton1
+    local start = pointerStarts[input]
+    pointerStarts[input] = nil
+    local cancelled = input.UserInputState == Enum.UserInputState.Cancel
     if input == dragInput then
         dragInput = nil
-        if not dragMoved then
+        if not dragMoved and not cancelled then
             toggleMenu()
         end
     end
-    if not isPointer or not fingerStart or not MenuFrame.Visible then
-        if isPointer then fingerStart = nil end
+    if not isPointer or not start or cancelled or not MenuFrame.Visible then
         return
     end
     local here = Vector2.new(input.Position.X, input.Position.Y)
-    local delta = here - fingerStart
-    fingerStart = nil
+    local delta = here - start
     if math.abs(delta.X) > 18 or math.abs(delta.Y) > 18 then return end
     if pointIn(MainBtn, here.X, here.Y) then return end
     if not pointIn(Scroll, here.X, here.Y) then return end
     local best, bestArea = nil, math.huge
     for _, entry in ipairs(pressables) do
-        if pointIn(entry.gui, here.X, here.Y) then
+        if pointIn(entry.gui, here.X, here.Y) and pointIn(entry.gui, start.X, start.Y) then
             local size = entry.gui.AbsoluteSize
             local area = size.X * size.Y
             if area < bestArea then
@@ -680,11 +687,7 @@ local function IsVisible(hrp, head)
 end
 
 local function drawSkeleton(e, char, color)
-    for i = 1, e.SkeletonCount do
-        ReleaseDrawing(e.SkeletonLines[i])
-    end
-    e.SkeletonLines = {}
-    e.SkeletonCount = 0
+    local count = 0
     local boneMap = char:FindFirstChild("UpperTorso") and R15Bones or R6Bones
     for _, pair in ipairs(boneMap) do
         local p1 = char:FindFirstChild(pair[1])
@@ -693,59 +696,68 @@ local function drawSkeleton(e, char, color)
             local s1, v1 = Camera:WorldToViewportPoint(p1.Position)
             local s2, v2 = Camera:WorldToViewportPoint(p2.Position)
             if v1 and v2 then
-                local line = GetDrawing("Line")
+                count += 1
+                local line = e.SkeletonLines[count]
+                if not line then
+                    line = GetDrawing("Line")
+                    e.SkeletonLines[count] = line
+                end
                 line.From = Vector2.new(s1.X, s1.Y)
                 line.To = Vector2.new(s2.X, s2.Y)
                 line.Color = color
                 line.Visible = true
-                e.SkeletonCount += 1
-                e.SkeletonLines[e.SkeletonCount] = line
             end
         end
     end
+    for i = count + 1, e.SkeletonCount do
+        ReleaseDrawing(e.SkeletonLines[i])
+        e.SkeletonLines[i] = nil
+    end
+    e.SkeletonCount = count
 end
 
 -- MAIN LOOP ------------------------------------------------------------------
 
-local function refreshDrawings()
+local function refreshDrawings(refreshBounds)
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
             local e = ESPData[p]
             local char = p.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             local head = char and char:FindFirstChild("Head")
-            local hasDraw = e and (e.Box or e.HealthBar or e.NameText or e.DistText or (e.SkeletonCount and e.SkeletonCount > 0))
+            local hasDraw = e and (e.Box or e.HealthBar or e.NameText or e.DistText or e.SkeletonPending)
             if hasDraw and hrp and head then
                 local rootPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
                 if onScreen then
-                    local headPos = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
-                    local legPos = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
-                    local height = math.abs(headPos.Y - legPos.Y)
-                    local width = height * 0.5
-                    local boxX = rootPos.X - width * 0.5
-                    local boxY = headPos.Y
-                    if e.Box then
-                        e.Box.Size = Vector2.new(width, height)
-                        e.Box.Position = Vector2.new(boxX, boxY)
+                    if refreshBounds then
+                        local headPos = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+                        local legPos = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+                        local height = math.abs(headPos.Y - legPos.Y)
+                        local width = height * 0.5
+                        local boxX = rootPos.X - width * 0.5
+                        local boxY = headPos.Y
+                        if e.Box then
+                            e.Box.Size = Vector2.new(width, height)
+                            e.Box.Position = Vector2.new(boxX, boxY)
+                        end
+                        if e.HealthBar and height > 4 then
+                            local hum = char:FindFirstChildOfClass("Humanoid")
+                            local hp = hum and math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1) or 1
+                            e.HealthBar.Size = Vector2.new(3, height * hp)
+                            e.HealthBar.Position = Vector2.new(boxX - 6, boxY + height * (1 - hp))
+                        end
+                        if e.NameText then
+                            e.NameText.Position = Vector2.new(boxX + width * 0.5, boxY - 15)
+                        end
+                        if e.DistText then
+                            e.DistText.Position = Vector2.new(boxX + width * 0.5, boxY + height + 3)
+                        end
                     end
-                    if e.HealthBar and height > 4 then
-                        local hum = char:FindFirstChildOfClass("Humanoid")
-                        local hp = hum and math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1) or 1
-                        e.HealthBar.Size = Vector2.new(3, height * hp)
-                        e.HealthBar.Position = Vector2.new(boxX - 6, boxY + height * (1 - hp))
+                    if SETTINGS.Skeleton and e.SkeletonPending then
+                        drawSkeleton(e, char, e.SkeletonColor)
                     end
-                    if e.NameText then
-                        e.NameText.Position = Vector2.new(boxX + width * 0.5, boxY - 15)
-                    end
-                    if e.DistText then
-                        e.DistText.Position = Vector2.new(boxX + width * 0.5, boxY + height + 3)
-                    end
-                    if SETTINGS.Skeleton and e.SkeletonCount > 0 then
-                        local color = (e.Box and e.Box.Color)
-                            or (e.NameText and e.NameText.Color)
-                            or Color3.new(1, 1, 1)
-                        drawSkeleton(e, char, color)
-                    end
+                else
+                    ClearVisuals(e)
                 end
             end
         end
@@ -771,13 +783,15 @@ local function renderFrame(dt)
 
     local candidates = {}
     local alive = {}
+    local needsVisibility = (aiming and SETTINGS.WallCheck) or SETTINGS.Chams
+        or SETTINGS.Skeleton or SETTINGS.NameText or SETTINGS.DistanceText
 
     local filterLen = 0
     if LocalPlayer.Character then
         filterLen += 1
         scratchFilter[filterLen] = LocalPlayer.Character
     end
-    if not SETTINGS.FFAMode and LocalPlayer.Team ~= nil then
+    if needsVisibility and not SETTINGS.FFAMode and LocalPlayer.Team ~= nil then
         for _, other in ipairs(Players:GetPlayers()) do
             if other ~= LocalPlayer and other.Team == LocalPlayer.Team and other.Character then
                 filterLen += 1
@@ -814,10 +828,12 @@ local function renderFrame(dt)
                         if dist > SETTINGS.MaxDistance then
                             ClearVisuals(e)
                         else
-                            scratchFilter[baseLen + 1] = char
-                            RayParams.FilterDescendantsInstances = scratchFilter
+                            if needsVisibility then
+                                scratchFilter[baseLen + 1] = char
+                                RayParams.FilterDescendantsInstances = scratchFilter
+                            end
 
-                            local visible = IsVisible(hrp, head)
+                            local visible = not needsVisibility or IsVisible(hrp, head)
                             local color = allied and SETTINGS.ColorTeam
                                 or (visible and SETTINGS.ColorVisible or SETTINGS.ColorHidden)
 
@@ -843,7 +859,8 @@ local function renderFrame(dt)
                             end
 
                             if SETTINGS.Skeleton then
-                                drawSkeleton(e, char, color)
+                                e.SkeletonPending = true
+                                e.SkeletonColor = color
                             else
                                 ReleaseAllSkeletonLines(e)
                             end
@@ -977,11 +994,12 @@ local function renderFrame(dt)
             goal = goal * CFrame.Angles(jy, jx, 0)
         end
         Camera.CFrame = goal
-        -- The snap is the camera this frame will actually show. Place the
-        -- drawings again so they stay on the bodies.
-        refreshDrawings()
     elseif FOVCircle then
         FOVCircle.Color = Color3.fromRGB(255, 50, 50)
+    end
+    -- Draw bones once, using the final camera after any aim snap.
+    if target or SETTINGS.Skeleton then
+        refreshDrawings(target ~= nil)
     end
 end
 
@@ -1016,6 +1034,8 @@ _G.__HamonUnload = function()
         end)
     end
     table.clear(Connections)
+    table.clear(pointerStarts)
+    dragInput = nil
     for _, pool in pairs(DrawingPool) do
         for _, d in ipairs(pool) do
             destroyDrawing(d)
