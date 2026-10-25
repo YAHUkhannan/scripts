@@ -130,7 +130,7 @@ end
 
 check("skeletons reuse lines and render only after the aim snap", function()
     local allocations, releases, draws, rays=0,0,0,0
-    local e=env({Vector2=vectors,Vector3=vectors,SETTINGS={Skeleton=true,MaxDistance=500,LockLeeway=1.35},
+    local e=env({Vector2=vectors,Vector3=vectors,SETTINGS={ESPEnabled=true,Skeleton=true,MaxDistance=500,LockLeeway=1.35},
         R6Bones={{"Head","Torso"}}, R15Bones={}, ESPData={}, scratchFilter={},RayParams={}, FOVCircle={},
         CFrame={new=function(origin) return {Position=origin} end},
         Color3={fromRGB=function() return {} end,fromHSV=function() return {} end},
@@ -143,21 +143,112 @@ check("skeletons reuse lines and render only after the aim snap", function()
     local char={FindFirstChild=function(_,n) return parts[n] end,FindFirstChildOfClass=function() return hum end}
     local me,other={}, {Character=char}
     e.LocalPlayer=me;e.Players={GetPlayers=function() return {me,other} end}
-    local cam={ViewportSize=vector(1000,800),CFrame={Position=vector(0,0,0)},WorldToViewportPoint=function() return vector(500,400,1),true end}
+    local cam={ViewportSize=vector(1000,800),CFrame={Position=vector(0,0,0)}}
+    local shake=0
+    function cam:WorldToViewportPoint(p) return vector(500+shake,400-p.Y*10,1),true end
     e.Camera=cam;e.workspace={CurrentCamera=cam}
-    local entry={SkeletonLines={},SkeletonCount=0};e.ESPData[other]=entry
+    local entry={SkeletonLines={},SkeletonCount=0,BoxLines={}};e.ESPData[other]=entry
     e.EnsureEntry=function() return entry end
     e.ReleaseAllSkeletonLines=fn(hamon,"local function ReleaseAllSkeletonLines(e)","local function ClearVisuals", "ReleaseAllSkeletonLines",e)
-    e.ClearVisuals=function(x) e.ReleaseAllSkeletonLines(x) end
+    e.ReleaseAllBoxLines=fn(hamon,"local function ReleaseAllBoxLines(e)","local function ClearVisuals", "ReleaseAllBoxLines",e)
+    e.ClearVisuals=fn(hamon,"local function ClearVisuals(e)","local function EnsureEntry", "ClearVisuals",e)
     local draw=fn(hamon,"local function drawSkeleton(e, char, color)","-- MAIN LOOP", "drawSkeleton",e)
-    e.drawSkeleton=function(...) draws=draws+1;return draw(...) end
-    e.refreshDrawings=fn(hamon,"local function refreshDrawings(refreshBounds)","local renderWarned", "refreshDrawings",e)
+    e.drawSkeleton=function(...)
+        assert(cam.CFrame.snapped, "bones were projected before aim updated the camera")
+        draws=draws+1;return draw(...)
+    end
+    e.CFrame.new=function(origin) return {Position=origin,snapped=true} end
+    e.refreshDrawings=fn(hamon,"local function refreshDrawings()","local renderWarned", "refreshDrawings",e)
     local frame=fn(hamon,"local function renderFrame(dt)","-- After the default camera", "renderFrame",e)
     frame(1/60);assert(draws==1 and allocations==1 and releases==0)
     local lines=entry.SkeletonLines
+    local before=lines[1].From.X
+    shake=17
     frame(1/60);assert(draws==2 and allocations==1 and releases==0 and lines==entry.SkeletonLines)
+    assert(lines[1].From.X==before+17, "bones did not follow the camera shake")
+    e.SETTINGS.ESPEnabled=false;rays=0
+    frame(1/60);assert(draws==2 and rays==0 and releases==1 and not entry.DrawPending)
+    e.SETTINGS.ESPEnabled=true
     e.SETTINGS.Skeleton=false;e.AimActive=function() return false end;rays=0
     frame(1/60);assert(rays==0 and releases==1 and lines==entry.SkeletonLines)
+end)
+
+check("corner boxes stay thin, fade at distance, and yield to tiny skeletons", function()
+    local allocations, releases=0,0
+    local e=env({SETTINGS={Skeleton=true},BOX_COLOR={},Vector2=vectors,
+        GetDrawing=function() allocations=allocations+1;return {} end,
+        ReleaseDrawing=function(d) releases=releases+1;d.Visible=false end})
+    e.ReleaseAllBoxLines=fn(hamon,"local function ReleaseAllBoxLines(e)","local function ClearVisuals", "ReleaseAllBoxLines",e)
+    local draw=compile(section(hamon,"local function setBoxLine(","local function drawSkeleton").."\nreturn drawBox",e)
+    local entry={BoxLines={}}
+    draw(entry,100,100,50,100)
+    assert(allocations==8 and #entry.BoxLines==8)
+    local first=entry.BoxLines[1]
+    local opacity=first.Transparency
+    for _, line in ipairs(entry.BoxLines) do
+        assert(line.Thickness==1 and line.Color==e.BOX_COLOR and line.Visible)
+    end
+    assert(entry.BoxLines[1].To.X < entry.BoxLines[3].From.X, "top corners joined into a full border")
+    draw(entry,100,100,20,40)
+    assert(allocations==8 and entry.BoxLines[1]==first and first.Transparency<opacity)
+    draw(entry,100,100,10,20)
+    assert(#entry.BoxLines==0 and releases==8 and not first.Visible)
+    e.SETTINGS.Skeleton=false
+    draw(entry,100,100,10,20)
+    assert(#entry.BoxLines==8, "small boxes should remain available without bones")
+end)
+
+check("menu sections expand independently of feature switches and hide inactive hit targets", function()
+    local created, actions, deferred={}, {}, {}
+    local enum={AutomaticSize={Y="Y"},SortOrder={LayoutOrder=1},TextXAlignment={Left=1}}
+    local e=env({SETTINGS={Aim=false,ESPEnabled=false},Scroll={},FONT=1,WHITE={},BLACK={},Enum=enum,
+        Vector2=vectors,UDim={new=function(...) return {...} end},
+        UDim2={new=function(...) return {...} end,fromOffset=function(...) return {...} end},
+        Color3={fromRGB=function(...) return {...} end},resizeCanvas=function() end,
+        task={defer=function(f) deferred[#deferred+1]=f end},nextOrder=function() return #created end,
+        bindPress=function(button,callback) actions[button]=callback end})
+    e.Instance={new=function(kind,parent)
+        local object=gui(0,0,100,20)
+        object.Parent=parent;object.kind=kind
+        function object:IsA(name) return name=="GuiObject" and self.kind~="ScreenGui" end
+        created[#created+1]=object
+        return object
+    end}
+    e.Scroll=e.Instance.new("ScrollingFrame")
+    local make=compile(section(hamon,"local sections = {}","local function MakeRow").."\nreturn MakeSection",e)
+    local aim=make("AIM","Aim")
+    local walls=make("WALLS","ESPEnabled")
+    local game=make("GAME")
+    assert(not aim.Visible and not walls.Visible and not game.Visible)
+    local function buttons(body)
+        local header
+        for _, object in ipairs(created) do
+            if object.kind=="Frame" and object.Parent==e.Scroll and object.LayoutOrder<body.LayoutOrder then
+                header=object
+            end
+        end
+        local title, toggle
+        for _, object in ipairs(created) do
+            if object.kind=="TextButton" and object.Parent==header then
+                if object.Text=="OFF" or object.Text=="ON" then toggle=object else title=object end
+            end
+        end
+        return title,toggle
+    end
+    local aimTitle,aimToggle=buttons(aim)
+    local wallsTitle,wallsToggle=buttons(walls)
+    actions[aimToggle]();assert(e.SETTINGS.Aim and aim.Visible and not walls.Visible)
+    actions[wallsTitle]();assert(e.SETTINGS.Aim and not aim.Visible and walls.Visible and not e.SETTINGS.ESPEnabled)
+    actions[wallsToggle]();assert(e.SETTINGS.ESPEnabled and walls.Visible)
+    actions[wallsTitle]();assert(e.SETTINGS.ESPEnabled and not walls.Visible)
+    actions[aimTitle]();assert(aim.Visible and not walls.Visible)
+    actions[aimToggle]();assert(not e.SETTINGS.Aim and not aim.Visible and e.SETTINGS.ESPEnabled)
+    local hit=fn(hamon,"local function pointIn(gui, x, y)","local sections", "pointIn",e)
+    local row=e.Instance.new("TextButton",walls)
+    assert(not hit(row,10,10), "collapsed rows intercepted a touch")
+    walls.Visible=true;assert(hit(row,10,10))
+    walls.ClipsDescendants=true;walls.AbsoluteSize=vector(5,5)
+    assert(not hit(row,10,10), "clipped rows intercepted a touch")
 end)
 
 check("pings consume fresh calls, keep newest samples, and reset cleanly", function()

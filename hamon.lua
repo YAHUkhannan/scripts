@@ -6,7 +6,7 @@ local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.1"
+local VERSION = "1.2"
 
 if type(_G.__HamonUnload) == "function" then
     pcall(_G.__HamonUnload)
@@ -20,13 +20,14 @@ local SETTINGS = {
     Prediction = false, PredictionAmount = 0.05,
     TargetPriority = "crosshair", LockTarget = true, LockLeeway = 1.35,
     MaxAngle = 70, Humanize = false, HumanJitter = 0.12,
-    Chams = false, Skeleton = false, HealthBar = false,
+    ESPEnabled = false, Chams = false, Skeleton = true, HealthBar = false,
     NameText = false, DistanceText = false, MaxDistance = 500,
     WallCheck = false, FFAMode = false, MultiPointVis = true,
     ColorVisible = Color3.fromRGB(0, 255, 100),
     ColorHidden  = Color3.fromRGB(255, 50, 50),
-    ColorTeam    = Color3.fromRGB(80, 140, 255),
+    ColorTeam    = Color3.fromRGB(255, 190, 70),
 }
+local BOX_COLOR = Color3.fromRGB(235, 235, 235)
 
 local aimHeld = false
 local MenuOpen = false
@@ -63,14 +64,14 @@ local function GetDrawing(className)
     drawKind[d] = className
     drawBusy[d] = true
     if className == "Line" then
-        d.Thickness = 1.5
+        d.Thickness = 1
         d.Transparency = 1
     elseif className == "Square" then
         d.Filled = false
         d.Transparency = 1
         d.Thickness = 1
     elseif className == "Text" then
-        d.Size = 14
+        d.Size = 12
         d.Center = true
         d.Outline = true
         d.OutlineColor = Color3.new(0, 0, 0)
@@ -107,19 +108,26 @@ local function ReleaseAllSkeletonLines(e)
     e.SkeletonColor = nil
 end
 
+local function ReleaseAllBoxLines(e)
+    if not e then return end
+    for _, line in ipairs(e.BoxLines) do ReleaseDrawing(line) end
+    table.clear(e.BoxLines)
+end
+
 local function ClearVisuals(e)
     if not e then return end
-    if e.Box then ReleaseDrawing(e.Box); e.Box = nil end
+    ReleaseAllBoxLines(e)
     if e.HealthBar then ReleaseDrawing(e.HealthBar); e.HealthBar = nil end
     if e.NameText then ReleaseDrawing(e.NameText); e.NameText = nil end
     if e.DistText then ReleaseDrawing(e.DistText); e.DistText = nil end
     ReleaseAllSkeletonLines(e)
+    e.DrawPending = false
 end
 
 local function EnsureEntry(p)
     local e = ESPData[p]
     if not e then
-        e = { SkeletonLines = {}, SkeletonCount = 0 }
+        e = { SkeletonLines = {}, SkeletonCount = 0, BoxLines = {} }
         ESPData[p] = e
     end
     return e
@@ -164,8 +172,9 @@ pcall(function()
 end)
 
 local BTN = 32
-local MENU_W = 150
-local MENU_H = 204
+local MENU_W = 138
+local MENU_H = 176
+local moveMenuUnderButton
 
 local function sweepOldGui(root)
     if typeof(root) ~= "Instance" then return end
@@ -289,10 +298,11 @@ Scroll.BorderSizePixel = 0
 Scroll.ScrollBarThickness = 3
 Scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 255, 255)
 Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Scroll.AutomaticCanvasSize = Enum.AutomaticSize.None
 Scroll.ScrollingDirection = Enum.ScrollingDirection.Y
 Scroll.Active = true
 Scroll.Selectable = false
+Scroll.ClipsDescendants = true
 Scroll.ZIndex = 12
 Scroll.Parent = MenuFrame
 
@@ -302,7 +312,8 @@ Layout.SortOrder = Enum.SortOrder.LayoutOrder
 Layout.Parent = Scroll
 
 local function resizeCanvas()
-    Scroll.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 12)
+    Scroll.CanvasSize = UDim2.fromOffset(0, Layout.AbsoluteContentSize.Y + 4)
+    if moveMenuUnderButton then moveMenuUnderButton() end
 end
 Track(Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(resizeCanvas))
 
@@ -339,19 +350,125 @@ local function bindPress(guiObj, fn)
 end
 
 local function pointIn(gui, x, y)
-    if not gui or not gui.Visible then return false end
+    if not gui then return false end
+    local ancestor = gui
+    while ancestor do
+        if ancestor:IsA("GuiObject") then
+            if not ancestor.Visible then return false end
+            if ancestor.ClipsDescendants then
+                local pos, size = ancestor.AbsolutePosition, ancestor.AbsoluteSize
+                if x < pos.X or y < pos.Y or x > pos.X + size.X or y > pos.Y + size.Y then
+                    return false
+                end
+            end
+        end
+        ancestor = ancestor.Parent
+    end
     local pos = gui.AbsolutePosition
     local size = gui.AbsoluteSize
     return x >= pos.X and y >= pos.Y and x <= pos.X + size.X and y <= pos.Y + size.Y
 end
 
-local function MakeRow(text, toggleKey, cycleValues)
+local sections = {}
+local function MakeSection(title, masterKey)
+    local header = Instance.new("Frame")
+    header.Size = UDim2.new(1, -4, 0, 22)
+    header.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+    header.BorderSizePixel = 0
+    header.LayoutOrder = nextOrder()
+    header.ZIndex = 14
+    header.Parent = Scroll
+    Instance.new("UICorner", header).CornerRadius = UDim.new(0, 4)
+
+    local disclosure = Instance.new("TextButton")
+    disclosure.Size = UDim2.new(1, masterKey and -40 or 0, 1, 0)
+    disclosure.BackgroundTransparency = 1
+    disclosure.Font = FONT
+    disclosure.TextSize = 10
+    disclosure.TextXAlignment = Enum.TextXAlignment.Left
+    disclosure.TextColor3 = WHITE
+    disclosure.TextStrokeTransparency = 1
+    disclosure.AutoButtonColor = false
+    disclosure.Active = true
+    disclosure.ZIndex = 15
+    disclosure.Parent = header
+
+    local body = Instance.new("Frame")
+    body.Name = title .. "Settings"
+    body.Size = UDim2.new(1, -4, 0, 0)
+    body.AutomaticSize = Enum.AutomaticSize.Y
+    body.BackgroundTransparency = 1
+    body.Visible = false
+    body.LayoutOrder = nextOrder()
+    body.ZIndex = 14
+    body.Parent = Scroll
+    local bodyLayout = Instance.new("UIListLayout", body)
+    bodyLayout.Padding = UDim.new(0, 2)
+    bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local section = { body = body }
+    sections[#sections + 1] = section
+    function section.expand(open)
+        body.Visible = open
+        disclosure.Text = (open and "  - " or "  + ") .. title
+    end
+    function section.open()
+        for _, other in ipairs(sections) do
+            other.expand(other == section)
+        end
+        Scroll.CanvasPosition = Vector2.zero
+        task.defer(resizeCanvas)
+    end
+    section.expand(false)
+    bindPress(disclosure, function()
+        if body.Visible then
+            section.expand(false)
+            task.defer(resizeCanvas)
+        else
+            section.open()
+        end
+    end)
+
+    if masterKey then
+        local toggle = Instance.new("TextButton")
+        toggle.Size = UDim2.fromOffset(36, 20)
+        toggle.Position = UDim2.new(1, -38, 0, 1)
+        toggle.Font = FONT
+        toggle.TextSize = 10
+        toggle.TextStrokeTransparency = 1
+        toggle.AutoButtonColor = false
+        toggle.Active = true
+        toggle.ZIndex = 15
+        toggle.Parent = header
+        Instance.new("UICorner", toggle).CornerRadius = UDim.new(0, 3)
+        local function updateToggle()
+            local on = SETTINGS[masterKey]
+            toggle.Text = on and "ON" or "OFF"
+            toggle.TextColor3 = WHITE
+            toggle.BackgroundColor3 = on and Color3.fromRGB(55, 55, 55) or BLACK
+        end
+        updateToggle()
+        bindPress(toggle, function()
+            SETTINGS[masterKey] = not SETTINGS[masterKey]
+            updateToggle()
+            if SETTINGS[masterKey] then
+                section.open()
+            else
+                section.expand(false)
+                task.defer(resizeCanvas)
+            end
+        end)
+    end
+    return body
+end
+
+local function MakeRow(parent, text, toggleKey, cycleValues)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -4, 0, 22)
+    btn.Size = UDim2.new(1, 0, 0, 20)
     btn.BackgroundColor3 = BLACK
     btn.BorderSizePixel = 0
     btn.Font = FONT
-    btn.TextSize = 11
+    btn.TextSize = 10
     btn.TextXAlignment = Enum.TextXAlignment.Left
     btn.TextColor3 = WHITE
     btn.TextStrokeTransparency = 1
@@ -360,7 +477,7 @@ local function MakeRow(text, toggleKey, cycleValues)
     btn.Selectable = false
     btn.ZIndex = 14
     btn.LayoutOrder = nextOrder()
-    btn.Parent = Scroll
+    btn.Parent = parent
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
 
     local function Update()
@@ -395,40 +512,28 @@ local function MakeRow(text, toggleKey, cycleValues)
     end)
 end
 
-MakeRow("AIM v" .. VERSION, "Aim")
-MakeRow("PREDICT", "Prediction")
-MakeRow("HUMANIZE", "Humanize")
-MakeRow("LOCK", "LockTarget")
-MakeRow("WALLS", "WallCheck")
-MakeRow("FFA", "FFAMode")
-MakeRow("BOX", "Chams")
-MakeRow("BONES", "Skeleton")
-MakeRow("HP", "HealthBar")
-MakeRow("NAME", "NameText")
-MakeRow("DIST", "DistanceText")
-
 local function snap(value, step, minv, maxv)
     local clamped = math.clamp(value, minv, maxv)
     local snapped = math.floor((clamped / step) + 0.5) * step
     return tonumber(string.format("%.4f", snapped)) or clamped
 end
 
-local function MakeNumericRow(label, field, minv, maxv, step, fmt)
+local function MakeNumericRow(parent, label, field, minv, maxv, step, fmt)
     local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, -4, 0, 22)
+    row.Size = UDim2.new(1, 0, 0, 20)
     row.BackgroundColor3 = BLACK
     row.BorderSizePixel = 0
     row.Active = false
     row.ZIndex = 14
     row.LayoutOrder = nextOrder()
-    row.Parent = Scroll
+    row.Parent = parent
 
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, -52, 1, 0)
     lbl.Position = UDim2.new(0, 6, 0, 0)
     lbl.BackgroundTransparency = 1
     lbl.Font = FONT
-    lbl.TextSize = 11
+    lbl.TextSize = 10
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.TextColor3 = WHITE
     lbl.TextStrokeTransparency = 1
@@ -473,8 +578,37 @@ local function MakeNumericRow(label, field, minv, maxv, step, fmt)
     end)
 end
 
-MakeNumericRow("FOV",  "AimFOV",           2, 80,  1,    "%s  %.0f")
-MakeNumericRow("LEAD", "PredictionAmount", 0.0, 0.4, 0.01, "%s  %.2fs")
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -4, 0, 14)
+title.BackgroundTransparency = 1
+title.Font = FONT
+title.TextSize = 9
+title.TextColor3 = Color3.fromRGB(180, 180, 180)
+title.TextStrokeTransparency = 1
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Text = "  HAMON v" .. VERSION
+title.LayoutOrder = nextOrder()
+title.ZIndex = 14
+title.Parent = Scroll
+
+local aimSection = MakeSection("AIM", "Aim")
+MakeRow(aimSection, "PREDICT", "Prediction")
+MakeRow(aimSection, "HUMANIZE", "Humanize")
+MakeRow(aimSection, "LOCK", "LockTarget")
+MakeRow(aimSection, "VISIBLE ONLY", "WallCheck")
+MakeNumericRow(aimSection, "FOV", "AimFOV", 2, 80, 1, "%s  %.0f")
+MakeNumericRow(aimSection, "LEAD", "PredictionAmount", 0.0, 0.4, 0.01, "%s  %.2fs")
+
+local wallsSection = MakeSection("WALLS", "ESPEnabled")
+MakeRow(wallsSection, "BONES", "Skeleton")
+MakeRow(wallsSection, "BOXES", "Chams")
+MakeRow(wallsSection, "HEALTH", "HealthBar")
+MakeRow(wallsSection, "NAMES", "NameText")
+MakeRow(wallsSection, "DISTANCE", "DistanceText")
+
+local gameSection = MakeSection("GAME")
+MakeRow(gameSection, "FFA", "FFAMode")
+MakeNumericRow(gameSection, "RANGE", "MaxDistance", 100, 2000, 100, "%s  %.0f")
 task.defer(resizeCanvas)
 
 -- DRAG + TAP ------------------------------------------------------------------
@@ -503,10 +637,12 @@ local function buttonOffset()
     return x, y, vp
 end
 
-local function moveMenuUnderButton()
+moveMenuUnderButton = function()
     local x, y, vp = buttonOffset()
     MainBtn.Position = UDim2.fromOffset(x, y)
-    local mw, mh = MENU_W, MENU_H
+    local mw = math.min(MENU_W, math.max(0, vp.X - 16))
+    local mh = math.min(math.max(80, Layout.AbsoluteContentSize.Y + 8), MENU_H, math.max(0, vp.Y - 16))
+    MenuFrame.Size = UDim2.fromOffset(mw, mh)
     local mx = math.clamp(x, 0, math.max(0, vp.X - mw))
     local my = y + BTN + 6
     if my + mh > vp.Y - 8 then
@@ -686,6 +822,42 @@ local function IsVisible(hrp, head)
     return workspace:Raycast(camPos, hrp.Position - camPos, RayParams) == nil
 end
 
+local function setBoxLine(e, index, x1, y1, x2, y2, opacity)
+    local line = e.BoxLines[index]
+    if not line then
+        line = GetDrawing("Line")
+        e.BoxLines[index] = line
+    end
+    line.From = Vector2.new(x1, y1)
+    line.To = Vector2.new(x2, y2)
+    line.Thickness = 1
+    line.Transparency = opacity
+    line.Color = BOX_COLOR
+    line.Visible = true
+end
+
+local function drawBox(e, x, y, width, height)
+    -- At tiny screen sizes, let bones carry the information instead of merging
+    -- eight corner strokes with them. Size-based fading also follows zoom.
+    if width < 4 or height < (SETTINGS.Skeleton and 24 or 10) then
+        ReleaseAllBoxLines(e)
+        return
+    end
+    local length = math.min(width * 0.22, height * 0.12, 10)
+    local opacity = math.clamp(height / 100, 0.28, 0.7)
+    if SETTINGS.Skeleton then opacity = opacity * 0.8 end
+    local left, right = x - 2, x + width + 2
+    local top, bottom = y - 2, y + height + 2
+    setBoxLine(e, 1, left, top, left + length, top, opacity)
+    setBoxLine(e, 2, left, top, left, top + length, opacity)
+    setBoxLine(e, 3, right - length, top, right, top, opacity)
+    setBoxLine(e, 4, right, top, right, top + length, opacity)
+    setBoxLine(e, 5, left, bottom, left + length, bottom, opacity)
+    setBoxLine(e, 6, left, bottom - length, left, bottom, opacity)
+    setBoxLine(e, 7, right - length, bottom, right, bottom, opacity)
+    setBoxLine(e, 8, right, bottom - length, right, bottom, opacity)
+end
+
 local function drawSkeleton(e, char, color)
     local count = 0
     local boneMap = char:FindFirstChild("UpperTorso") and R15Bones or R6Bones
@@ -704,6 +876,9 @@ local function drawSkeleton(e, char, color)
                 end
                 line.From = Vector2.new(s1.X, s1.Y)
                 line.To = Vector2.new(s2.X, s2.Y)
+                -- Box and bone lines share a pool; reset the box's faded style.
+                line.Thickness = 1
+                line.Transparency = 1
                 line.Color = color
                 line.Visible = true
             end
@@ -718,43 +893,70 @@ end
 
 -- MAIN LOOP ------------------------------------------------------------------
 
-local function refreshDrawings(refreshBounds)
+local function refreshDrawings()
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
             local e = ESPData[p]
             local char = p.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             local head = char and char:FindFirstChild("Head")
-            local hasDraw = e and (e.Box or e.HealthBar or e.NameText or e.DistText or e.SkeletonPending)
-            if hasDraw and hrp and head then
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if e and e.DrawPending and hrp and head and hum then
                 local rootPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
-                if onScreen then
-                    if refreshBounds then
-                        local headPos = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
-                        local legPos = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
-                        local height = math.abs(headPos.Y - legPos.Y)
-                        local width = height * 0.5
-                        local boxX = rootPos.X - width * 0.5
-                        local boxY = headPos.Y
-                        if e.Box then
-                            e.Box.Size = Vector2.new(width, height)
-                            e.Box.Position = Vector2.new(boxX, boxY)
-                        end
-                        if e.HealthBar and height > 4 then
-                            local hum = char:FindFirstChildOfClass("Humanoid")
-                            local hp = hum and math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1) or 1
-                            e.HealthBar.Size = Vector2.new(3, height * hp)
-                            e.HealthBar.Position = Vector2.new(boxX - 6, boxY + height * (1 - hp))
-                        end
-                        if e.NameText then
-                            e.NameText.Position = Vector2.new(boxX + width * 0.5, boxY - 15)
-                        end
-                        if e.DistText then
-                            e.DistText.Position = Vector2.new(boxX + width * 0.5, boxY + height + 3)
-                        end
+                local headPos = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+                local legPos = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+                if onScreen and headPos.Z > 0 and legPos.Z > 0 then
+                    local height = math.abs(headPos.Y - legPos.Y)
+                    local width = height * 0.5
+                    local boxX = rootPos.X - width * 0.5
+                    local boxY = math.min(headPos.Y, legPos.Y)
+                    if SETTINGS.Chams then
+                        drawBox(e, boxX, boxY, width, height)
+                    else
+                        ReleaseAllBoxLines(e)
                     end
-                    if SETTINGS.Skeleton and e.SkeletonPending then
+
+                    if SETTINGS.Skeleton then
                         drawSkeleton(e, char, e.SkeletonColor)
+                    else
+                        ReleaseAllSkeletonLines(e)
+                    end
+
+                    if SETTINGS.HealthBar and height > 4 then
+                        local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                        if not e.HealthBar then
+                            e.HealthBar = GetDrawing("Square")
+                            e.HealthBar.Filled = true
+                        end
+                        e.HealthBar.Size = Vector2.new(2, height * hp)
+                        e.HealthBar.Position = Vector2.new(boxX - 6, boxY + height * (1 - hp))
+                        e.HealthBar.Color = Color3.fromHSV(hp * 0.33, 1, 1)
+                        e.HealthBar.Visible = true
+                    elseif e.HealthBar then
+                        ReleaseDrawing(e.HealthBar)
+                        e.HealthBar = nil
+                    end
+
+                    if SETTINGS.NameText then
+                        if not e.NameText then e.NameText = GetDrawing("Text") end
+                        e.NameText.Text = p.Name
+                        e.NameText.Position = Vector2.new(rootPos.X, boxY - 13)
+                        e.NameText.Color = BOX_COLOR
+                        e.NameText.Visible = true
+                    elseif e.NameText then
+                        ReleaseDrawing(e.NameText)
+                        e.NameText = nil
+                    end
+
+                    if SETTINGS.DistanceText then
+                        if not e.DistText then e.DistText = GetDrawing("Text") end
+                        e.DistText.Text = string.format("%d studs", math.floor(e.DrawDistance))
+                        e.DistText.Position = Vector2.new(rootPos.X, boxY + height + 3)
+                        e.DistText.Color = BOX_COLOR
+                        e.DistText.Visible = true
+                    elseif e.DistText then
+                        ReleaseDrawing(e.DistText)
+                        e.DistText = nil
                     end
                 else
                     ClearVisuals(e)
@@ -783,8 +985,9 @@ local function renderFrame(dt)
 
     local candidates = {}
     local alive = {}
-    local needsVisibility = (aiming and SETTINGS.WallCheck) or SETTINGS.Chams
-        or SETTINGS.Skeleton or SETTINGS.NameText or SETTINGS.DistanceText
+    local wallsActive = SETTINGS.ESPEnabled and (SETTINGS.Chams or SETTINGS.Skeleton
+        or SETTINGS.HealthBar or SETTINGS.NameText or SETTINGS.DistanceText)
+    local needsVisibility = (aiming and SETTINGS.WallCheck) or (wallsActive and SETTINGS.Skeleton)
 
     local filterLen = 0
     if LocalPlayer.Character then
@@ -808,6 +1011,7 @@ local function renderFrame(dt)
         if p ~= LocalPlayer then
             alive[p] = true
             local e = EnsureEntry(p)
+            if not wallsActive then ClearVisuals(e) end
             local char = p.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -837,73 +1041,11 @@ local function renderFrame(dt)
                             local color = allied and SETTINGS.ColorTeam
                                 or (visible and SETTINGS.ColorVisible or SETTINGS.ColorHidden)
 
-                            local headPos = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
-                            local legPos = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
-                            local height = math.abs(headPos.Y - legPos.Y)
-                            local width = height * 0.5
-                            local boxX = rootPos.X - width * 0.5
-                            local boxY = headPos.Y
-
-                            if SETTINGS.Chams then
-                                if not e.Box then
-                                    e.Box = GetDrawing("Square")
-                                    e.Box.Filled = false
-                                end
-                                e.Box.Size = Vector2.new(width, height)
-                                e.Box.Position = Vector2.new(boxX, boxY)
-                                e.Box.Color = color
-                                e.Box.Visible = true
-                            elseif e.Box then
-                                ReleaseDrawing(e.Box)
-                                e.Box = nil
-                            end
-
-                            if SETTINGS.Skeleton then
-                                e.SkeletonPending = true
+                            if wallsActive then
+                                e.DrawPending = true
+                                e.DrawDistance = dist
+                                e.SkeletonPending = SETTINGS.Skeleton
                                 e.SkeletonColor = color
-                            else
-                                ReleaseAllSkeletonLines(e)
-                            end
-
-                            if SETTINGS.HealthBar and height > 4 then
-                                local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-                                if not e.HealthBar then
-                                    e.HealthBar = GetDrawing("Square")
-                                    e.HealthBar.Filled = true
-                                end
-                                e.HealthBar.Size = Vector2.new(3, height * hp)
-                                e.HealthBar.Position = Vector2.new(boxX - 6, boxY + height * (1 - hp))
-                                e.HealthBar.Color = Color3.fromHSV(hp * 0.33, 1, 1)
-                                e.HealthBar.Visible = true
-                            elseif e.HealthBar then
-                                ReleaseDrawing(e.HealthBar)
-                                e.HealthBar = nil
-                            end
-
-                            if SETTINGS.NameText then
-                                if not e.NameText then
-                                    e.NameText = GetDrawing("Text")
-                                end
-                                e.NameText.Text = p.Name
-                                e.NameText.Position = Vector2.new(boxX + width * 0.5, boxY - 15)
-                                e.NameText.Color = color
-                                e.NameText.Visible = true
-                            elseif e.NameText then
-                                ReleaseDrawing(e.NameText)
-                                e.NameText = nil
-                            end
-
-                            if SETTINGS.DistanceText then
-                                if not e.DistText then
-                                    e.DistText = GetDrawing("Text")
-                                end
-                                e.DistText.Text = string.format("%d m", math.floor(dist))
-                                e.DistText.Position = Vector2.new(boxX + width * 0.5, boxY + height + 3)
-                                e.DistText.Color = color
-                                e.DistText.Visible = true
-                            elseif e.DistText then
-                                ReleaseDrawing(e.DistText)
-                                e.DistText = nil
                             end
 
                             if aiming then
@@ -997,9 +1139,9 @@ local function renderFrame(dt)
     elseif FOVCircle then
         FOVCircle.Color = Color3.fromRGB(255, 50, 50)
     end
-    -- Draw bones once, using the final camera after any aim snap.
-    if target or SETTINGS.Skeleton then
-        refreshDrawings(target ~= nil)
+    -- Project every overlay once from the final camera, after any aim snap.
+    if wallsActive then
+        refreshDrawings()
     end
 end
 
