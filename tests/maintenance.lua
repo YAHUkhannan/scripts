@@ -143,6 +143,7 @@ check("skeletons reuse lines and render only after the aim snap", function()
     local char={FindFirstChild=function(_,n) return parts[n] end,FindFirstChildOfClass=function() return hum end}
     local me,other={}, {Character=char}
     e.LocalPlayer=me;e.Players={GetPlayers=function() return {me,other} end}
+    e.IsTeammate=fn(hamon,"local function IsTeammate(p)","local aimHeld", "IsTeammate",e)
     local cam={ViewportSize=vector(1000,800),CFrame={Position=vector(0,0,0)}}
     local shake=0
     function cam:WorldToViewportPoint(p) return vector(500+shake,400-p.Y*10,1),true end
@@ -171,6 +172,65 @@ check("skeletons reuse lines and render only after the aim snap", function()
     e.SETTINGS.ESPEnabled=true
     e.SETTINGS.Skeleton=false;e.AimActive=function() return false end;rays=0
     frame(1/60);assert(rays==0 and releases==1 and lines==entry.SkeletonLines)
+end)
+
+check("FFA and neutral players stay opponents for aiming, colors, and visibility", function()
+    local team, otherTeam={},{}
+    local e=env({Vector2=vectors,Vector3=vectors,ESPData={},scratchFilter={},RayParams={},FOVCircle={},
+        SETTINGS={ESPEnabled=true,Skeleton=true,WallCheck=true,MaxDistance=500,LockLeeway=1.35,
+            ColorVisible={},ColorHidden={},ColorTeam={}},
+        CFrame={new=function(origin) return {Position=origin,snapped=true} end},
+        Color3={fromRGB=function() return {} end,fromHSV=function() return {} end},
+        ComputeFOVRadius=function() return 30 end,AimActive=function() return true end,
+        refreshDrawings=function() end})
+    local parts={Head={Position=vector(0,2,100)},HumanoidRootPart={Position=vector(0,0,100)}}
+    local hum={Health=100,MaxHealth=100}
+    local char={FindFirstChild=function(_,n) return parts[n] end,FindFirstChildOfClass=function() return hum end}
+    local me,other={Character={}}, {Character=char}
+    e.LocalPlayer=me;e.Players={GetPlayers=function() return {me,other} end}
+    local cam={ViewportSize=vector(1000,800),WorldToViewportPoint=function() return vector(500,400,1),true end}
+    e.Camera=cam;e.workspace={CurrentCamera=cam}
+    local entry={}
+    e.EnsureEntry=function() return entry end
+    e.ClearVisuals=function(x) x.DrawPending=false;x.SkeletonColor=nil end
+    e.IsTeammate=fn(hamon,"local function IsTeammate(p)","local aimHeld", "IsTeammate",e)
+    local frame=fn(hamon,"local function renderFrame(dt)","-- After the default camera", "renderFrame",e)
+    local scenarios={
+        {name="shared team in FFA",ffa=true,localTeam=team,otherTeam=team,opponent=true},
+        {name="actual teammate",localTeam=team,otherTeam=team,opponent=false},
+        {name="neutral opponent with matching team",localTeam=team,otherTeam=team,otherNeutral=true,opponent=true},
+        {name="neutral local player",localTeam=team,otherTeam=team,localNeutral=true,opponent=true},
+        {name="both neutral",localTeam=team,otherTeam=team,localNeutral=true,otherNeutral=true,opponent=true},
+        {name="different team",localTeam=team,otherTeam=otherTeam,opponent=true},
+        {name="both without a team",opponent=true},
+        {name="other player without a team",localTeam=team,opponent=true},
+        {name="FFA without teams",ffa=true,opponent=true},
+    }
+    -- Reuse one running frame across transitions to catch stale locks/filter entries.
+    for _, case in ipairs(scenarios) do
+        me.Team=case.localTeam;me.Neutral=case.localNeutral or false
+        other.Team=case.otherTeam;other.Neutral=case.otherNeutral or false
+        e.SETTINGS.FFAMode=case.ffa or false
+        for _, visible in ipairs({true,false}) do
+            cam.CFrame={Position=vector(0,0,0)}
+            e.IsVisible=function()
+                local own, ignored=0,0
+                for _, ignoredChar in ipairs(e.RayParams.FilterDescendantsInstances) do
+                    if ignoredChar==me.Character then own=own+1 end
+                    if ignoredChar==char then ignored=ignored+1 end
+                end
+                assert(own==1 and ignored==1, case.name..": opponent was misclassified in the ray filter")
+                return visible
+            end
+            frame(1/60)
+            assert(not not entry.DrawPending==case.opponent,case.name..": wrong ESP eligibility")
+            assert(not not cam.CFrame.snapped==(case.opponent and visible),case.name..": wrong aim eligibility")
+            if case.opponent then
+                assert(entry.SkeletonColor==(visible and e.SETTINGS.ColorVisible or e.SETTINGS.ColorHidden),
+                    case.name..": opponent kept a teammate color")
+            end
+        end
+    end
 end)
 
 check("corner boxes stay thin, fade at distance, and yield to tiny skeletons", function()

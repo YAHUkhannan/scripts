@@ -6,7 +6,7 @@ local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.2"
+local VERSION = "1.2.1"
 
 if type(_G.__HamonUnload) == "function" then
     pcall(_G.__HamonUnload)
@@ -28,6 +28,11 @@ local SETTINGS = {
     ColorTeam    = Color3.fromRGB(255, 190, 70),
 }
 local BOX_COLOR = Color3.fromRGB(235, 235, 235)
+
+local function IsTeammate(p)
+    return not SETTINGS.FFAMode and not LocalPlayer.Neutral and not p.Neutral
+        and LocalPlayer.Team ~= nil and p.Team == LocalPlayer.Team
+end
 
 local aimHeld = false
 local MenuOpen = false
@@ -994,9 +999,9 @@ local function renderFrame(dt)
         filterLen += 1
         scratchFilter[filterLen] = LocalPlayer.Character
     end
-    if needsVisibility and not SETTINGS.FFAMode and LocalPlayer.Team ~= nil then
+    if needsVisibility and not SETTINGS.FFAMode and not LocalPlayer.Neutral and LocalPlayer.Team ~= nil then
         for _, other in ipairs(Players:GetPlayers()) do
-            if other ~= LocalPlayer and other.Team == LocalPlayer.Team and other.Character then
+            if other ~= LocalPlayer and IsTeammate(other) and other.Character then
                 filterLen += 1
                 scratchFilter[filterLen] = other.Character
             end
@@ -1020,8 +1025,8 @@ local function renderFrame(dt)
             if not (char and hum and hrp and head) or hum.Health <= 0 then
                 ClearVisuals(e)
             else
-                local allied = p.Team ~= nil and p.Team == LocalPlayer.Team
-                if allied and not SETTINGS.FFAMode then
+                local allied = IsTeammate(p)
+                if allied then
                     ClearVisuals(e)
                 else
                     local rootPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
