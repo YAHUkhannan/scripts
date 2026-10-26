@@ -1,12 +1,12 @@
 -- language: Lua, file: silent.lua, target: Roblox (mobile executor)
--- Silent aim for every gun that fires GunFramework's ProjectileRender. Maintenance v1.1.
+-- Silent aim for GunFramework's ProjectileRender, with optional local shot capture.
 -- A shot is redirected only when a player's head is inside the FOV circle.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.1"
+local VERSION = "1.2"
 
 local genv = _G
 pcall(function()
@@ -57,7 +57,7 @@ local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
 local MENU_W = 132
-local MENU_H = 56
+local MENU_H = 108
 
 local function clearTarget()
     state.aim = nil
@@ -74,6 +74,104 @@ local function clearTarget()
     end
 end
 
+-- LOCAL SHOT CAPTURE ---------------------------------------------------------
+-- No network logging. The hook records bounded previews without calling any
+-- Instance methods, which would disturb the pending __namecall method.
+local capture = { enabled = false, events = {}, pos = 0, count = 0, dropped = 0,
+    pings = {}, number = 0, error = nil }
+local CAPTURE_MAX, CAPTURE_WINDOW = 96, 15
+local watchedRemotes = { ProjectileRender = true, CheckShot = true, ProjectileFinished = true }
+
+local function instancePath(value)
+    local names = {}
+    for _ = 1, 16 do
+        if not value then break end
+        table.insert(names, 1, value.Name)
+        value = value.Parent
+    end
+    return table.concat(names, ".")
+end
+
+local function preview(value, depth)
+    local kind = typeof(value)
+    if kind == "nil" then return "nil"
+    elseif kind == "number" then return string.format("%.17g", value)
+    elseif kind == "boolean" then return tostring(value)
+    elseif kind == "string" then return string.format("%q", value:sub(1, 160))
+    elseif kind == "Vector3" then
+        return string.format("V3(%.3f,%.3f,%.3f)", value.X, value.Y, value.Z)
+    elseif kind == "CFrame" then
+        return "CF(pos=" .. preview(value.Position, 0) .. ",look=" .. preview(value.LookVector, 0) .. ")"
+    elseif kind == "Instance" then
+        return value.ClassName .. ":" .. instancePath(value)
+    elseif kind == "table" then
+        if depth >= 2 then return "{...}" end
+        local items, count = {}, 0
+        for key, item in next, value do
+            count = count + 1
+            if count > 8 then items[#items + 1] = "..."; break end
+            items[#items + 1] = "[" .. preview(key, 2) .. "]=" .. preview(item, depth + 1)
+        end
+        return "{" .. table.concat(items, ",") .. "}"
+    end
+    return kind
+end
+
+local function resetCaptureEvents()
+    table.clear(capture.events)
+    capture.pos, capture.count, capture.dropped, capture.error = 0, 0, 0, nil
+end
+
+local function captureRemote(stage, remote, ...)
+    local argc, lines = select("#", ...), {}
+    for i = 1, math.min(argc, 24) do
+        lines[#lines + 1] = "  [" .. i .. "] " .. preview(select(i, ...), 0)
+    end
+    if argc > 24 then lines[#lines + 1] = "  ... arguments truncated" end
+    local context = "silent=" .. (state.enabled and "ON" or "OFF")
+        .. " target=" .. (state.part and instancePath(state.part) or "none")
+        .. " speed=" .. tostring(state.speed)
+    local entry = { t = os.clock(), text = stage .. " " .. instancePath(remote)
+        .. " argc=" .. argc .. "\n" .. context .. "\n" .. table.concat(lines, "\n") }
+    capture.pos = (capture.pos % CAPTURE_MAX) + 1
+    if capture.count == CAPTURE_MAX then capture.dropped = capture.dropped + 1 end
+    capture.events[capture.pos] = entry
+    capture.count = math.min(capture.count + 1, CAPTURE_MAX)
+end
+
+local function recordRemote(stage, remote, ...)
+    if not capture.enabled or not watchedRemotes[remote.Name] then return end
+    local ok, err = pcall(captureRemote, stage, remote, ...)
+    if not ok then capture.error = tostring(err) end
+end
+
+local function pingCapture()
+    capture.number = capture.number + 1
+    local now = os.clock()
+    local lines = { "===== PING " .. capture.number .. " =====" }
+    local found = 0
+    for i = 1, capture.count do
+        local index = ((capture.pos - capture.count + i - 1) % CAPTURE_MAX) + 1
+        local entry = capture.events[index]
+        if now - entry.t <= CAPTURE_WINDOW then
+            found = found + 1
+            lines[#lines + 1] = string.format("%.3fs before PING  %s", now - entry.t, entry.text)
+        end
+    end
+    if found == 0 then
+        lines[#lines + 1] = "No new watched reports in the last " .. CAPTURE_WINDOW .. " seconds."
+    end
+    if capture.dropped > 0 then lines[#lines + 1] = "Buffer overflow: " .. capture.dropped .. " earlier reports dropped." end
+    if capture.error then lines[#lines + 1] = "Capture error: " .. capture.error end
+    capture.pings[#capture.pings + 1] = table.concat(lines, "\n")
+    if #capture.pings > 4 then table.remove(capture.pings, 1) end
+    resetCaptureEvents()
+    return "SILENT v" .. VERSION .. " | local capture | original=game, sent=rewritten\n"
+        .. "Outgoing reports do not confirm damage. Each PING consumes fresh reports.\n\n"
+        .. table.concat(capture.pings, "\n\n")
+end
+
+-- GUI -----------------------------------------------------------------------
 local function sweepOldGui(root)
     if typeof(root) ~= "Instance" then return end
     for _, child in ipairs(root:GetChildren()) do
@@ -226,6 +324,51 @@ end
 
 local MinusBtn = stepButton("-", -40)
 local PlusBtn = stepButton("+", -18)
+local CaptureBtn = makeRow(56, "  CAPTURE  OFF")
+local PingBtn = makeRow(82, "  PING")
+PingBtn.Size = UDim2.new(0.6, -4, 0, 22)
+local LogBtn = makeRow(82, "  LOG")
+LogBtn.Position = UDim2.new(0.6, 0, 0, 82)
+LogBtn.Size = UDim2.new(0.4, -4, 0, 22)
+
+local LogPanel = Instance.new("Frame", sg)
+LogPanel.Name = "ShotCapture"
+LogPanel.Size = UDim2.fromScale(0.94, 0.65)
+LogPanel.Position = UDim2.fromScale(0.03, 0.22)
+LogPanel.BackgroundColor3 = BLACK
+LogPanel.BorderSizePixel = 0
+LogPanel.Visible = false
+LogPanel.Active = true
+LogPanel.ClipsDescendants = true
+LogPanel.ZIndex = 30
+Instance.new("UICorner", LogPanel).CornerRadius = UDim.new(0, 5)
+
+local LogScroll = Instance.new("ScrollingFrame", LogPanel)
+LogScroll.Size = UDim2.new(1, -12, 1, -36)
+LogScroll.Position = UDim2.fromOffset(6, 30)
+LogScroll.BackgroundTransparency = 1
+LogScroll.BorderSizePixel = 0
+LogScroll.ScrollBarThickness = 4
+LogScroll.CanvasSize = UDim2.fromOffset(0, 0)
+LogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+LogScroll.ClipsDescendants = true
+LogScroll.ZIndex = 31
+
+local LogText = Instance.new("TextBox", LogScroll)
+LogText.Size = UDim2.new(1, -6, 0, 0)
+LogText.AutomaticSize = Enum.AutomaticSize.Y
+LogText.BackgroundTransparency = 1
+LogText.TextColor3 = WHITE
+LogText.Font = Enum.Font.Code
+LogText.TextSize = 11
+LogText.TextXAlignment = Enum.TextXAlignment.Left
+LogText.TextYAlignment = Enum.TextYAlignment.Top
+LogText.TextWrapped = true
+LogText.MultiLine = true
+LogText.ClearTextOnFocus = false
+LogText.Text = "Enable CAPTURE, shoot once, wait for impact, then PING within 15 seconds of the shot."
+LogText.ZIndex = 32
+pcall(function() LogText.TextEditable = false end)
 
 local function refreshUi()
     local on = state.enabled
@@ -265,22 +408,91 @@ local function toggleMenu()
 end
 
 local pressAt = {}
+local pointerStarts = {}
 local function bindPress(guiObj, fn)
-    local last = 0
-    local function go()
-        local now = os.clock()
-        if now - last < 0.2 then return end
-        last = now
+    pressAt[guiObj] = fn
+    track(guiObj.Activated:Connect(function(input)
+        if not input or input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then return end
         fn()
-    end
-    pressAt[guiObj] = go
-    track(guiObj.Activated:Connect(go))
-    pcall(function()
-        track(guiObj.TouchTap:Connect(function()
-            go()
-        end))
-    end)
+    end))
 end
+
+local function pointIn(gui, x, y)
+    if not gui then return false end
+    local ancestor = gui
+    while ancestor do
+        if ancestor:IsA("GuiObject") then
+            if not ancestor.Visible then return false end
+            if ancestor.ClipsDescendants then
+                local pos, size = ancestor.AbsolutePosition, ancestor.AbsoluteSize
+                if x < pos.X or y < pos.Y or x > pos.X + size.X or y > pos.Y + size.Y then return false end
+            end
+        end
+        ancestor = ancestor.Parent
+    end
+    local pos, size = gui.AbsolutePosition, gui.AbsoluteSize
+    return x >= pos.X and y >= pos.Y and x <= pos.X + size.X and y <= pos.Y + size.Y
+end
+
+local function pressableAt(x, y)
+    local best, bestArea, bestZ = nil, math.huge, -math.huge
+    local overLog = LogPanel.Visible and pointIn(LogPanel, x, y)
+    for guiObj, go in pairs(pressAt) do
+        if (not overLog or guiObj.Parent == LogPanel) and pointIn(guiObj, x, y) then
+            local size = guiObj.AbsoluteSize
+            local area, z = size.X * size.Y, guiObj.ZIndex
+            if z > bestZ or (z == bestZ and area < bestArea) then
+                best, bestArea, bestZ = { gui = guiObj, go = go }, area, z
+            end
+        end
+    end
+    return best
+end
+
+local function logAction(text, x, width, fn)
+    local button = Instance.new("TextButton", LogPanel)
+    button.Size = UDim2.fromOffset(width, 22)
+    button.Position = UDim2.fromOffset(x, 4)
+    button.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    button.TextColor3 = WHITE
+    button.Font = FONT
+    button.TextSize = 10
+    button.Text = text
+    button.AutoButtonColor = false
+    button.ZIndex = 33
+    bindPress(button, fn)
+    return button
+end
+
+bindPress(CaptureBtn, function()
+    capture.enabled = not capture.enabled
+    resetCaptureEvents()
+    CaptureBtn.Text = capture.enabled and "  CAPTURE  ON" or "  CAPTURE  OFF"
+end)
+bindPress(PingBtn, function()
+    if not capture.enabled then
+        LogText.Text = "CAPTURE is OFF. Enable it before the next test shot."
+    else
+        LogText.Text = pingCapture()
+    end
+    LogScroll.CanvasPosition = Vector2.zero
+    LogPanel.Visible = true
+end)
+bindPress(LogBtn, function() LogPanel.Visible = not LogPanel.Visible end)
+local CopyBtn
+CopyBtn = logAction("COPY", 6, 44, function()
+    local ok = type(setclipboard) == "function" and pcall(setclipboard, LogText.Text)
+    CopyBtn.Text = ok and "COPIED" or "SELECT"
+    if not ok then LogText:CaptureFocus() end
+end)
+logAction("CLEAR", 56, 44, function()
+    resetCaptureEvents()
+    table.clear(capture.pings)
+    capture.number = 0
+    LogText.Text = "Cleared. Shoot once, wait for the projectile to stop, then PING within 15 seconds of the shot."
+end)
+logAction("CLOSE", 106, 44, function() LogPanel.Visible = false end)
 
 bindPress(ToggleRow, function()
     state.enabled = not state.enabled
@@ -305,8 +517,8 @@ local dragInput = nil
 local dragMoved = false
 local dragStart = nil
 local startPos = nil
-local lastToggle = 0
-local lastTouchAt = 0
+local lastToggle = -math.huge
+local lastTouchAt = -math.huge
 
 track(MainBtn.InputBegan:Connect(function(input)
     local kind = input.UserInputType
@@ -327,6 +539,11 @@ track(MainBtn.InputBegan:Connect(function(input)
 end))
 
 track(UserInputService.InputChanged:Connect(function(input)
+    local press = pointerStarts[input]
+    if press then
+        local delta = Vector2.new(input.Position.X, input.Position.Y) - press.position
+        if math.abs(delta.X) > 18 or math.abs(delta.Y) > 18 then press.moved = true end
+    end
     if not dragInput or not dragStart or not startPos then return end
     local isMouseMove = dragInput.UserInputType == Enum.UserInputType.MouseButton1
         and input.UserInputType == Enum.UserInputType.MouseMovement
@@ -348,20 +565,18 @@ track(UserInputService.InputChanged:Connect(function(input)
     end
 end))
 
-local pointerStarts = {}
 track(UserInputService.InputBegan:Connect(function(input)
     local kind = input.UserInputType
-    if kind == Enum.UserInputType.Touch or kind == Enum.UserInputType.MouseButton1 then
-        pointerStarts[input] = Vector2.new(input.Position.X, input.Position.Y)
+    if kind == Enum.UserInputType.Touch then
+        lastTouchAt = os.clock()
+    elseif kind == Enum.UserInputType.MouseButton1 then
+        if os.clock() - lastTouchAt < 0.45 then return end
+    else
+        return
     end
+    local here = Vector2.new(input.Position.X, input.Position.Y)
+    pointerStarts[input] = { position = here, entry = pressableAt(here.X, here.Y), moved = false }
 end))
-
-local function pointIn(gui, x, y)
-    if not gui or not gui.Visible then return false end
-    local pos = gui.AbsolutePosition
-    local size = gui.AbsoluteSize
-    return x >= pos.X and y >= pos.Y and x <= pos.X + size.X and y <= pos.Y + size.Y
-end
 
 track(UserInputService.InputEnded:Connect(function(input)
     local kind = input.UserInputType
@@ -379,26 +594,15 @@ track(UserInputService.InputEnded:Connect(function(input)
             end
         end
     end
-    if not isPointer or not start or cancelled or not MenuFrame.Visible then
+    if not isPointer or not start or cancelled or not (MenuFrame.Visible or LogPanel.Visible) then
         return
     end
     local here = Vector2.new(input.Position.X, input.Position.Y)
-    local delta = here - start
-    if math.abs(delta.X) > 18 or math.abs(delta.Y) > 18 then return end
-    if pointIn(MainBtn, here.X, here.Y) then return end
-    local best, bestArea = nil, math.huge
-    for guiObj, go in pairs(pressAt) do
-        if pointIn(guiObj, here.X, here.Y) and pointIn(guiObj, start.X, start.Y) then
-            local size = guiObj.AbsoluteSize
-            local area = size.X * size.Y
-            if area < bestArea then
-                best = go
-                bestArea = area
-            end
-        end
-    end
-    if best then
-        best()
+    local delta = here - start.position
+    if start.moved or math.abs(delta.X) > 18 or math.abs(delta.Y) > 18 then return end
+    local entry = start.entry
+    if entry and pointIn(entry.gui, here.X, here.Y) then
+        entry.go()
     end
 end))
 
@@ -496,9 +700,11 @@ local function onNamecall(self, ...)
     if not callOld then
         return
     end
-    if not state.running or not state.enabled or method ~= "FireServer" or typeof(self) ~= "Instance" then
+    if not state.running or method ~= "FireServer" or typeof(self) ~= "Instance" then
         return callOld(self, ...)
     end
+    recordRemote("original", self, ...)
+    if not state.enabled then return callOld(self, ...) end
     local name = self.Name
     if name == "ProjectileRender" then
         local speed = select(5, ...)
@@ -524,6 +730,7 @@ local function onNamecall(self, ...)
     args[5] = CFrame.new(origin, aimPos)
     args[6] = aimPos
     args[7] = state.part
+    recordRemote("sent", self, table.unpack(args, 1, argc))
     return callPacked(callOld, self, method, args, argc)
 end
 
@@ -633,6 +840,9 @@ local function unload()
     end
     state.running = false
     state.enabled = false
+    capture.enabled = false
+    resetCaptureEvents()
+    table.clear(capture.pings)
     clearTarget()
     table.clear(pointerStarts)
     dragInput = nil

@@ -6,7 +6,7 @@ local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.2.1"
+local VERSION = "1.3"
 
 if type(_G.__HamonUnload) == "function" then
     pcall(_G.__HamonUnload)
@@ -127,6 +127,14 @@ local function ClearVisuals(e)
     if e.DistText then ReleaseDrawing(e.DistText); e.DistText = nil end
     ReleaseAllSkeletonLines(e)
     e.DrawPending = false
+end
+
+local function clearRigCache(e)
+    if e.RigAdded then e.RigAdded:Disconnect(); e.RigAdded = nil end
+    if e.RigRemoved then e.RigRemoved:Disconnect(); e.RigRemoved = nil end
+    if e.BoneParts then table.clear(e.BoneParts) end
+    e.RigCharacter = nil
+    e.RigDirty = true
 end
 
 local function EnsureEntry(p)
@@ -331,27 +339,19 @@ local function nextOrder()
     return rowOrder
 end
 
--- Row presses go through one hit-test on touch end. Button.Activated is wired to
--- the same debounce. Mobile executors often deliver only one of those.
+-- Pointer presses use one release handler. Activated handles keyboard/gamepad
+-- input only, so delayed mobile click/tap notifications cannot undo a toggle.
 local pressables = {}
 local pointerStarts = {}
 
 local function bindPress(guiObj, fn)
-    local entry = { gui = guiObj, fn = fn, last = 0 }
+    local entry = { gui = guiObj, go = fn }
     pressables[#pressables + 1] = entry
-    local function go()
-        local now = os.clock()
-        if now - entry.last < 0.2 then return end
-        entry.last = now
+    Track(guiObj.Activated:Connect(function(input)
+        if not input or input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then return end
         fn()
-    end
-    entry.go = go
-    Track(guiObj.Activated:Connect(go))
-    pcall(function()
-        Track(guiObj.TouchTap:Connect(function()
-            go()
-        end))
-    end)
+    end))
 end
 
 local function pointIn(gui, x, y)
@@ -372,6 +372,21 @@ local function pointIn(gui, x, y)
     local pos = gui.AbsolutePosition
     local size = gui.AbsoluteSize
     return x >= pos.X and y >= pos.Y and x <= pos.X + size.X and y <= pos.Y + size.Y
+end
+
+local function pressableAt(x, y)
+    local best, bestArea = nil, math.huge
+    for _, entry in ipairs(pressables) do
+        if pointIn(entry.gui, x, y) then
+            local size = entry.gui.AbsoluteSize
+            local area = size.X * size.Y
+            if area < bestArea then
+                best = entry
+                bestArea = area
+            end
+        end
+    end
+    return best
 end
 
 local sections = {}
@@ -625,8 +640,8 @@ local dragInput = nil
 local dragMoved = false
 local dragStartPos = nil
 local startBtnPos = nil
-local lastToggle = 0
-local lastTouchAt = 0
+local lastToggle = -math.huge
+local lastTouchAt = -math.huge
 local DRAG_THRESHOLD = 16
 
 local function buttonOffset()
@@ -687,6 +702,11 @@ Track(MainBtn.InputBegan:Connect(function(input)
 end))
 
 Track(UserInputService.InputChanged:Connect(function(input)
+    local press = pointerStarts[input]
+    if press then
+        local delta = Vector2.new(input.Position.X, input.Position.Y) - press.position
+        if math.abs(delta.X) > 18 or math.abs(delta.Y) > 18 then press.moved = true end
+    end
     if not dragInput or not dragStartPos or not startBtnPos then return end
     local isMouseMove = dragInput.UserInputType == Enum.UserInputType.MouseButton1
         and input.UserInputType == Enum.UserInputType.MouseMovement
@@ -708,10 +728,18 @@ end))
 
 Track(UserInputService.InputBegan:Connect(function(input)
     local kind = input.UserInputType
-    if kind ~= Enum.UserInputType.Touch and kind ~= Enum.UserInputType.MouseButton1 then
+    if kind == Enum.UserInputType.Touch then
+        lastTouchAt = os.clock()
+    elseif kind == Enum.UserInputType.MouseButton1 then
+        if os.clock() - lastTouchAt < 0.45 then return end
+    else
         return
     end
-    pointerStarts[input] = Vector2.new(input.Position.X, input.Position.Y)
+    local here = Vector2.new(input.Position.X, input.Position.Y)
+    local entry = MenuFrame.Visible and pointIn(Scroll, here.X, here.Y)
+        and pressableAt(here.X, here.Y) or nil
+    -- Capture the button before its callback can move/expand the menu.
+    pointerStarts[input] = { position = here, entry = entry, moved = false }
 end))
 
 Track(UserInputService.InputEnded:Connect(function(input)
@@ -730,23 +758,13 @@ Track(UserInputService.InputEnded:Connect(function(input)
         return
     end
     local here = Vector2.new(input.Position.X, input.Position.Y)
-    local delta = here - start
-    if math.abs(delta.X) > 18 or math.abs(delta.Y) > 18 then return end
+    local delta = here - start.position
+    if start.moved or math.abs(delta.X) > 18 or math.abs(delta.Y) > 18 then return end
     if pointIn(MainBtn, here.X, here.Y) then return end
     if not pointIn(Scroll, here.X, here.Y) then return end
-    local best, bestArea = nil, math.huge
-    for _, entry in ipairs(pressables) do
-        if pointIn(entry.gui, here.X, here.Y) and pointIn(entry.gui, start.X, start.Y) then
-            local size = entry.gui.AbsoluteSize
-            local area = size.X * size.Y
-            if area < bestArea then
-                best = entry
-                bestArea = area
-            end
-        end
-    end
-    if best then
-        best.go()
+    local entry = start.entry
+    if entry and pointIn(entry.gui, here.X, here.Y) then
+        entry.go()
     end
 end))
 
@@ -827,6 +845,34 @@ local function IsVisible(hrp, head)
     return workspace:Raycast(camPos, hrp.Position - camPos, RayParams) == nil
 end
 
+local function cachedBones(e, char)
+    if e.RigCharacter ~= char then
+        clearRigCache(e)
+        e.RigCharacter = char
+        e.BoneParts = e.BoneParts or {}
+        local function changed(child)
+            if child:IsA("BasePart") then e.RigDirty = true end
+        end
+        e.RigAdded = char.ChildAdded:Connect(changed)
+        e.RigRemoved = char.ChildRemoved:Connect(changed)
+    end
+    if e.RigDirty then
+        local parts = e.BoneParts
+        table.clear(parts)
+        local boneMap = char:FindFirstChild("UpperTorso") and R15Bones or R6Bones
+        for _, pair in ipairs(boneMap) do
+            local p1 = char:FindFirstChild(pair[1])
+            local p2 = char:FindFirstChild(pair[2])
+            if p1 and p2 then
+                parts[#parts + 1] = p1
+                parts[#parts + 1] = p2
+            end
+        end
+        e.RigDirty = false
+    end
+    return e.BoneParts
+end
+
 local function setBoxLine(e, index, x1, y1, x2, y2, opacity)
     local line = e.BoxLines[index]
     if not line then
@@ -865,28 +911,25 @@ end
 
 local function drawSkeleton(e, char, color)
     local count = 0
-    local boneMap = char:FindFirstChild("UpperTorso") and R15Bones or R6Bones
-    for _, pair in ipairs(boneMap) do
-        local p1 = char:FindFirstChild(pair[1])
-        local p2 = char:FindFirstChild(pair[2])
-        if p1 and p2 then
-            local s1, v1 = Camera:WorldToViewportPoint(p1.Position)
-            local s2, v2 = Camera:WorldToViewportPoint(p2.Position)
-            if v1 and v2 then
-                count += 1
-                local line = e.SkeletonLines[count]
-                if not line then
-                    line = GetDrawing("Line")
-                    e.SkeletonLines[count] = line
-                end
-                line.From = Vector2.new(s1.X, s1.Y)
-                line.To = Vector2.new(s2.X, s2.Y)
-                -- Box and bone lines share a pool; reset the box's faded style.
-                line.Thickness = 1
-                line.Transparency = 1
-                line.Color = color
-                line.Visible = true
+    local parts = cachedBones(e, char)
+    for i = 1, #parts, 2 do
+        local p1, p2 = parts[i], parts[i + 1]
+        local s1, v1 = Camera:WorldToViewportPoint(p1.Position)
+        local s2, v2 = Camera:WorldToViewportPoint(p2.Position)
+        if v1 and v2 then
+            count += 1
+            local line = e.SkeletonLines[count]
+            if not line then
+                line = GetDrawing("Line")
+                e.SkeletonLines[count] = line
             end
+            line.From = Vector2.new(s1.X, s1.Y)
+            line.To = Vector2.new(s2.X, s2.Y)
+            -- Box and bone lines share a pool; reset the box's faded style.
+            line.Thickness = 1
+            line.Transparency = 1
+            line.Color = color
+            line.Visible = true
         end
     end
     for i = count + 1, e.SkeletonCount do
@@ -898,8 +941,8 @@ end
 
 -- MAIN LOOP ------------------------------------------------------------------
 
-local function refreshDrawings()
-    for _, p in ipairs(Players:GetPlayers()) do
+local function refreshDrawings(players)
+    for _, p in ipairs(players) do
         if p ~= LocalPlayer then
             local e = ESPData[p]
             local char = p.Character
@@ -972,15 +1015,28 @@ local function refreshDrawings()
 end
 
 local renderWarned = false
+local renderWasActive = false
 
 local function renderFrame(dt)
+    local aiming = AimActive()
+    local wallsActive = SETTINGS.ESPEnabled and (SETTINGS.Chams or SETTINGS.Skeleton
+        or SETTINGS.HealthBar or SETTINGS.NameText or SETTINGS.DistanceText)
+    if not aiming and not wallsActive then
+        if renderWasActive then
+            for _, e in pairs(ESPData) do ClearVisuals(e) end
+            lockedTarget = nil
+            renderWasActive = false
+        end
+        if FOVCircle then FOVCircle.Visible = false end
+        return
+    end
+    renderWasActive = true
     Camera = workspace.CurrentCamera
     if not Camera then return end
 
     local viewport = Camera.ViewportSize
     local center = Vector2.new(viewport.X * 0.5, viewport.Y * 0.5)
     local radius = ComputeFOVRadius()
-    local aiming = AimActive()
 
     if FOVCircle then
         FOVCircle.Radius = radius
@@ -990,8 +1046,7 @@ local function renderFrame(dt)
 
     local candidates = {}
     local alive = {}
-    local wallsActive = SETTINGS.ESPEnabled and (SETTINGS.Chams or SETTINGS.Skeleton
-        or SETTINGS.HealthBar or SETTINGS.NameText or SETTINGS.DistanceText)
+    local players = Players:GetPlayers()
     local needsVisibility = (aiming and SETTINGS.WallCheck) or (wallsActive and SETTINGS.Skeleton)
 
     local filterLen = 0
@@ -1000,7 +1055,7 @@ local function renderFrame(dt)
         scratchFilter[filterLen] = LocalPlayer.Character
     end
     if needsVisibility and not SETTINGS.FFAMode and not LocalPlayer.Neutral and LocalPlayer.Team ~= nil then
-        for _, other in ipairs(Players:GetPlayers()) do
+        for _, other in ipairs(players) do
             if other ~= LocalPlayer and IsTeammate(other) and other.Character then
                 filterLen += 1
                 scratchFilter[filterLen] = other.Character
@@ -1012,12 +1067,13 @@ local function renderFrame(dt)
     end
     local baseLen = filterLen
 
-    for _, p in ipairs(Players:GetPlayers()) do
+    for _, p in ipairs(players) do
         if p ~= LocalPlayer then
             alive[p] = true
             local e = EnsureEntry(p)
             if not wallsActive then ClearVisuals(e) end
             local char = p.Character
+            if e.RigCharacter and e.RigCharacter ~= char then clearRigCache(e) end
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             local head = char and char:FindFirstChild("Head")
@@ -1087,6 +1143,7 @@ local function renderFrame(dt)
     for p, e in pairs(ESPData) do
         if not alive[p] then
             ClearVisuals(e)
+            clearRigCache(e)
             ESPData[p] = nil
         end
     end
@@ -1146,7 +1203,7 @@ local function renderFrame(dt)
     end
     -- Project every overlay once from the final camera, after any aim snap.
     if wallsActive then
-        refreshDrawings()
+        refreshDrawings(players)
     end
 end
 
@@ -1165,6 +1222,7 @@ end)
 
 Track(Players.PlayerRemoving:Connect(function(p)
     ClearVisuals(ESPData[p])
+    if ESPData[p] then clearRigCache(ESPData[p]) end
     ESPData[p] = nil
     if lockedTarget and lockedTarget.player == p then
         lockedTarget = nil
@@ -1183,6 +1241,8 @@ _G.__HamonUnload = function()
     table.clear(Connections)
     table.clear(pointerStarts)
     dragInput = nil
+    for _, e in pairs(ESPData) do clearRigCache(e) end
+    table.clear(ESPData)
     for _, pool in pairs(DrawingPool) do
         for _, d in ipairs(pool) do
             destroyDrawing(d)

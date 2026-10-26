@@ -59,7 +59,7 @@ check("reloads preserve forwarding and coexist with another hook", function()
     active = function(_, ...) calls=calls+1; return select("#", ...), ... end
     local function instance(s, isSilent)
         local e = env({genv=shared, original={}, game={}, conns={}, connections={}, buf={}, pingLog={},
-            state={running=true,enabled=true}, running=true, pointerStarts={},
+            state={running=true,enabled=true}, running=true, pointerStarts={},capture={pings={}},resetCaptureEvents=function() end,
             clearTarget=function() end, sg={Destroy=function() end},
             getnamecallmethod=function() return "FireServer" end,
             newcclosure=function(f) return f end,
@@ -105,26 +105,58 @@ check("camera loss, disable, and render errors clear the target", function()
 end)
 
 for _, item in ipairs({{silent,"track",false},{hamon,"Track",true}}) do
-    check((item[3] and "Hamon" or "Silent") .. " keeps concurrent touches separate", function()
+    check((item[3] and "Hamon" or "Silent") .. " handles each pointer gesture once", function()
         local source, track, isHamon=item[1],item[2],item[3]
-        local input={InputBegan=signal(),InputEnded=signal()}
+        local input={InputBegan=signal(),InputEnded=signal(),InputChanged=signal()}
         local left,right=gui(100,100,30,30),gui(150,100,30,30)
         local hits={0,0}
+        local now=10
+        for _, g in ipairs({left,right}) do g.Activated=signal();g.TouchTap=signal();g.ZIndex=14 end
         local e=env({UserInputService=input,Enum=inputEnum,Vector2=vectors,
-            MenuFrame={Visible=true},Scroll=gui(90,90,100,60),MainBtn=gui(0,0,20,20),
-            pointIn=pointIn, pressables={{gui=left,go=function() hits[1]=hits[1]+1 end},{gui=right,go=function() hits[2]=hits[2]+1 end}},
-            pressAt={[left]=function() hits[1]=hits[1]+1 end,[right]=function() hits[2]=hits[2]+1 end}})
+            MenuFrame={Visible=true},LogPanel={Visible=false},Scroll=gui(90,90,100,60),MainBtn=gui(0,0,20,20),
+            pointIn=pointIn, pressables={},pressAt={},pointerStarts={},lastTouchAt=-math.huge,
+            os={clock=function() return now end}})
         e[track]=function(c) return c end
-        local code=section(source,track .. "(UserInputService.InputBegan:Connect(function(input)\n    local kind",
-            isHamon and "-- AIM KEY" or "-- FOV")
-        compile("local pointerStarts = {}\n" .. code,e)
+        local bind=fn(source,"local function bindPress(guiObj, fn)","local function pointIn", "bindPress",e)
+        e.pressableAt=fn(source,"local function pressableAt(x, y)",isHamon and "local sections" or "local function logAction", "pressableAt",e)
+        bind(left,function() hits[1]=hits[1]+1 end);bind(right,function() hits[2]=hits[2]+1 end)
+        compile(section(source,track .. "(UserInputService.InputBegan:Connect(function(input)\n    local kind",
+            isHamon and "-- AIM KEY" or "-- FOV"),e)
+        compile(section(source,track .. "(UserInputService.InputChanged:Connect(function(input)",
+            track .. "(UserInputService.InputBegan:Connect(function(input)\n    local kind"),e)
         local a={UserInputType="touch",Position=vector(110,110)}
         local b={UserInputType="touch",Position=vector(160,110)}
         input.InputBegan:emit(a);input.InputBegan:emit(b)
+        left.Activated:emit(a);assert(hits[1]==0)
         input.InputEnded:emit(a);input.InputEnded:emit(b)
         assert(hits[1]==1 and hits[2]==1)
+        now=now+1;left.Activated:emit(a);left.TouchTap:emit();input.InputEnded:emit(a)
+        assert(hits[1]==1, "a delayed native event undid the toggle")
+        input.InputBegan:emit(a);input.InputEnded:emit(a)
+        input.InputBegan:emit(a);input.InputEnded:emit(a)
+        assert(hits[1]==3, "real rapid taps were discarded")
+        local mouse={UserInputType="mouse",Position=vector(110,110)}
+        now=now+.1;input.InputBegan:emit(mouse);input.InputEnded:emit(mouse);left.Activated:emit(mouse)
+        assert(hits[1]==3, "synthetic mouse click repeated a touch")
         a.UserInputState="cancel";input.InputBegan:emit(a);input.InputEnded:emit(a)
-        assert(hits[1]==1)
+        assert(hits[1]==3)
+        a.UserInputState=nil;input.InputBegan:emit(a)
+        a.Position=vector(160,160);input.InputChanged:emit(a)
+        a.Position=vector(110,110);input.InputChanged:emit(a);input.InputEnded:emit(a)
+        assert(hits[1]==3, "scrolling away and back activated a row")
+        input.InputBegan:emit(a)
+        left.AbsolutePosition=vector(200,200);right.AbsolutePosition=vector(100,100)
+        input.InputEnded:emit(a)
+        assert(hits[1]==3 and hits[2]==1, "layout changes activated a different row")
+        left.Activated:emit({UserInputType="keyboard"});assert(hits[1]==4)
+        if not isHamon then
+            e.LogPanel=gui(90,90,150,150)
+            input.InputBegan:emit(a);input.InputEnded:emit(a)
+            assert(hits[2]==1, "log panel allowed a tap through to the menu")
+            right.Parent=e.LogPanel;right.ZIndex=33
+            input.InputBegan:emit(a);input.InputEnded:emit(a)
+            assert(hits[2]==2, "log action was blocked by its own panel")
+        end
     end)
 end
 
@@ -140,7 +172,8 @@ check("skeletons reuse lines and render only after the aim snap", function()
         IsVisible=function() rays=rays+1;return true end})
     local parts={Head={Position=vector(0,2,100)},Torso={Position=vector(0,1,100)},HumanoidRootPart={Position=vector(0,0,100)}}
     local hum={Health=100,MaxHealth=100}
-    local char={FindFirstChild=function(_,n) return parts[n] end,FindFirstChildOfClass=function() return hum end}
+    local char={FindFirstChild=function(_,n) return parts[n] end,FindFirstChildOfClass=function() return hum end,
+        ChildAdded=signal(),ChildRemoved=signal()}
     local me,other={}, {Character=char}
     e.LocalPlayer=me;e.Players={GetPlayers=function() return {me,other} end}
     e.IsTeammate=fn(hamon,"local function IsTeammate(p)","local aimHeld", "IsTeammate",e)
@@ -153,13 +186,15 @@ check("skeletons reuse lines and render only after the aim snap", function()
     e.ReleaseAllSkeletonLines=fn(hamon,"local function ReleaseAllSkeletonLines(e)","local function ClearVisuals", "ReleaseAllSkeletonLines",e)
     e.ReleaseAllBoxLines=fn(hamon,"local function ReleaseAllBoxLines(e)","local function ClearVisuals", "ReleaseAllBoxLines",e)
     e.ClearVisuals=fn(hamon,"local function ClearVisuals(e)","local function EnsureEntry", "ClearVisuals",e)
+    e.clearRigCache=fn(hamon,"local function clearRigCache(e)","local function EnsureEntry", "clearRigCache",e)
+    e.cachedBones=fn(hamon,"local function cachedBones(e, char)","local function setBoxLine", "cachedBones",e)
     local draw=fn(hamon,"local function drawSkeleton(e, char, color)","-- MAIN LOOP", "drawSkeleton",e)
     e.drawSkeleton=function(...)
         assert(cam.CFrame.snapped, "bones were projected before aim updated the camera")
         draws=draws+1;return draw(...)
     end
     e.CFrame.new=function(origin) return {Position=origin,snapped=true} end
-    e.refreshDrawings=fn(hamon,"local function refreshDrawings()","local renderWarned", "refreshDrawings",e)
+    e.refreshDrawings=fn(hamon,"local function refreshDrawings(players)","local renderWarned", "refreshDrawings",e)
     local frame=fn(hamon,"local function renderFrame(dt)","-- After the default camera", "renderFrame",e)
     frame(1/60);assert(draws==1 and allocations==1 and releases==0)
     local lines=entry.SkeletonLines
@@ -231,6 +266,99 @@ check("FFA and neutral players stay opponents for aiming, colors, and visibility
             end
         end
     end
+end)
+
+check("idle Hamon clears once without scanning players", function()
+    local scans, clears, aiming=0,0,false
+    local e=env({SETTINGS={},ESPData={},FOVCircle={},Vector2=vectors,scratchFilter={},
+        AimActive=function() return aiming end,ComputeFOVRadius=function() return 30 end,
+        ClearVisuals=function() clears=clears+1 end,
+        Players={GetPlayers=function() scans=scans+1;return {} end},LocalPlayer={},
+        Color3={fromRGB=function() return {} end},
+        workspace={CurrentCamera={ViewportSize=vector(800,600)}}})
+    local frame=fn(hamon,"local function renderFrame(dt)","-- After the default camera", "renderFrame",e)
+    for _=1,20 do frame(1/60) end
+    assert(scans==0 and clears==0)
+    aiming=true;frame(1/60);assert(scans==1)
+    e.ESPData.player={};e.lockedTarget={};aiming=false
+    for _=1,20 do frame(1/60) end
+    assert(scans==1 and clears==1 and e.lockedTarget==nil and not e.FOVCircle.Visible)
+    e.ESPData.player=nil;aiming=true;frame(1/60);assert(scans==2)
+end)
+
+check("bone caches reuse references, handle part changes, and detach old characters", function()
+    local lookups, releases=0,0
+    local e=env({Vector2=vectors,R6Bones={{"Head","Torso"},{"Torso","Left Arm"}},R15Bones={{"Head","UpperTorso"}},
+        GetDrawing=function() return {} end,ReleaseDrawing=function(d) releases=releases+1;d.Visible=false end,
+        Camera={WorldToViewportPoint=function(_,p) return p,true end}})
+    e.clearRigCache=fn(hamon,"local function clearRigCache(e)","local function EnsureEntry", "clearRigCache",e)
+    e.cachedBones=fn(hamon,"local function cachedBones(e, char)","local function setBoxLine", "cachedBones",e)
+    local draw=fn(hamon,"local function drawSkeleton(e, char, color)","-- MAIN LOOP", "drawSkeleton",e)
+    local function part() return {Position=vector(1,2,3),IsA=function(_,name) return name=="BasePart" end} end
+    local function character(parts)
+        return {ChildAdded=signal(),ChildRemoved=signal(),FindFirstChild=function(_,name) lookups=lookups+1;return parts[name] end}
+    end
+    local parts={Head=part(),Torso=part()}
+    local char=character(parts)
+    local entry={SkeletonLines={},SkeletonCount=0}
+    draw(entry,char,{});local firstLookups=lookups
+    for _=1,20 do draw(entry,char,{}) end
+    assert(lookups==firstLookups and entry.SkeletonCount==1)
+    parts["Left Arm"]=part();char.ChildAdded:emit(parts["Left Arm"])
+    draw(entry,char,{});assert(lookups>firstLookups and entry.SkeletonCount==2)
+    local torso=parts.Torso;parts.Torso=nil;char.ChildRemoved:emit(torso)
+    draw(entry,char,{});assert(entry.SkeletonCount==0 and releases==2)
+    local nextChar=character({Head=part(),UpperTorso=part()})
+    draw(entry,nextChar,{});assert(entry.RigCharacter==nextChar and entry.SkeletonCount==1 and not entry.RigDirty)
+    char.ChildAdded:emit(part());assert(not entry.RigDirty, "old character listener survived respawn")
+    e.clearRigCache(entry);nextChar.ChildRemoved:emit(part())
+    assert(entry.RigCharacter==nil and #entry.BoneParts==0 and entry.RigAdded==nil and entry.RigRemoved==nil)
+end)
+
+check("silent capture preserves forwarding, nil arguments, and original/rewritten reports", function()
+    local now, forwarded=100,0
+    local function kind(value)
+        if getmetatable(value)==Vector then return "Vector3" end
+        return type(value)=="table" and value.kind or type(value)
+    end
+    local function inst(name,parent) return {kind="Instance",ClassName="RemoteEvent",Name=name,Parent=parent} end
+    local root=inst("Remote",inst("GunModules"))
+    local projectile,checkShot,finished=inst("ProjectileRender",root),inst("CheckShot",root),inst("ProjectileFinished",root)
+    local target=inst("Head",inst("Opponent"))
+    local e=env({VERSION="test",Vector3=vectors,typeof=kind,
+        state={running=true,enabled=false,speed=110},os={clock=function() return now end},original={},
+        getnamecallmethod=function() return "FireServer" end,setnamecallmethod=function() end,
+        CFrame={new=function(origin,aim) return {kind="CFrame",Position=origin,LookVector=aim} end}})
+    local capture,ping,record,reset=compile(section(silent,"-- LOCAL SHOT CAPTURE","-- GUI")
+        .."\nreturn capture,pingCapture,recordRemote,resetCaptureEvents",e)
+    e.recordRemote=record
+    e.leadAt=fn(silent,"local function leadAt(","local function callPacked", "leadAt",e)
+    e.callPacked=fn(silent,"local function callPacked(","-- CheckShot", "callPacked",e)
+    e.original[1]=function(_,...) forwarded=forwarded+1;e.sent=table.pack(...);return "ok",nil,e.sent.n end
+    local hook=fn(silent,"local function onNamecall(self, ...)","local renderWarned", "onNamecall",e)
+    hook(projectile,1,nil,3);assert(capture.count==0 and forwarded==1)
+    capture.enabled=true
+    local a,b,c=hook(projectile,1792138757.9282,nil,vector(1,2,3),vector(4,5,6),50,nil,7,8,"Bullet")
+    assert(a=="ok" and b==nil and c==9 and e.sent[2]==nil and e.sent[5]==50)
+    hook(finished,1,nil,3)
+    local text=ping();assert(text:find("ProjectileRender",1,true) and text:find("argc=9",1,true) and text:find("[2] nil",1,true))
+    ping();assert(capture.pings[#capture.pings]:find("No new",1,true))
+    e.state.enabled=true;e.state.part=target;e.state.eye=vector(0,0,0);e.state.head=vector(0,2,100);e.state.vel=vector(0,0,0)
+    local oldCf=e.CFrame.new(vector(0,0,0),vector(20,2,100))
+    hook(checkShot,1,nil,3,4,oldCf,vector(20,2,100),inst("Wall"),8,nil)
+    assert(e.sent.n==9 and e.sent[7]==target and e.sent[6].X==0 and e.sent[6].Y==2)
+    text=ping();assert(text:find("original ",1,true) and text:find("sent ",1,true) and text:find("Opponent.Head",1,true))
+    reset()
+    for i=1,100 do hook(finished,i) end
+    assert(capture.count==96 and capture.dropped==4)
+    text=ping();assert(text:find("Buffer overflow: 4",1,true))
+    hook(finished,123);now=now+7;ping();assert(capture.pings[#capture.pings]:find("ProjectileFinished",1,true))
+    hook(finished,123);now=now+16;ping();assert(capture.pings[#capture.pings]:find("No new",1,true))
+    e.state.enabled=false
+    local broken=setmetatable({kind="Instance",ClassName="Part"},{__index=function() error("preview failed") end})
+    local before=forwarded;hook(finished,broken)
+    assert(forwarded==before+1 and capture.error, "capture error interrupted the original call")
+    ping();assert(#capture.pings==4)
 end)
 
 check("corner boxes stay thin, fade at distance, and yield to tiny skeletons", function()
