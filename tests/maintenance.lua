@@ -332,7 +332,8 @@ check("silent capture preserves forwarding, nil arguments, and original/rewritte
     local capture,ping,record,reset=compile(section(silent,"-- LOCAL SHOT CAPTURE","-- GUI")
         .."\nreturn capture,pingCapture,recordRemote,resetCaptureEvents",e)
     e.recordRemote=record
-    e.leadAt=fn(silent,"local function leadAt(","local function callPacked", "leadAt",e)
+    e.leadAt=fn(silent,"local function leadAt(","local function reportRay", "leadAt",e)
+    e.reportRay=fn(silent,"local function reportRay(","local function callPacked", "reportRay",e)
     e.callPacked=fn(silent,"local function callPacked(","-- CheckShot", "callPacked",e)
     e.original[1]=function(_,...) forwarded=forwarded+1;e.sent=table.pack(...);return "ok",nil,e.sent.n end
     local hook=fn(silent,"local function onNamecall(self, ...)","local renderWarned", "onNamecall",e)
@@ -346,7 +347,14 @@ check("silent capture preserves forwarding, nil arguments, and original/rewritte
     e.state.enabled=true;e.state.part=target;e.state.eye=vector(0,0,0);e.state.head=vector(0,2,100);e.state.vel=vector(0,0,0)
     local oldCf=e.CFrame.new(vector(0,0,0),vector(20,2,100))
     hook(checkShot,1,nil,3,4,oldCf,vector(20,2,100),inst("Wall"),8,nil)
-    assert(e.sent.n==9 and e.sent[7]==target and e.sent[6].X==0 and e.sent[6].Y==2)
+    assert(e.sent.n==9 and e.sent[7]==target and e.sent[6].X==0 and e.sent[6].Y==2 and e.sent[6].Z==100)
+    assert(e.sent[5].Position.X==0 and e.sent[5].Position.Z==0, "clear shot must still start at our head")
+    e.state.covered=true
+    hook(checkShot,1,nil,3,4,oldCf,vector(20,2,100),inst("Wall"),8,nil)
+    local origin=e.sent[5].Position
+    assert(e.sent[7]==target and e.sent[6].Z==100)
+    assert((origin-vector(0,2,100)).Magnitude<2.5, "covered shot must start just outside the head")
+    assert(origin.Z>50, "covered shot must not start at our head")
     text=ping();assert(text:find("original ",1,true) and text:find("sent ",1,true) and text:find("Opponent.Head",1,true))
     reset()
     for i=1,100 do hook(finished,i) end

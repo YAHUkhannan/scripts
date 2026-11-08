@@ -1,12 +1,13 @@
 -- language: Lua, file: silent.lua, target: Roblox (mobile executor)
--- Silent aim for GunFramework's ProjectileRender, with optional local shot capture.
+-- Silent aim for GunFramework's CheckShot, with optional local shot capture.
 -- A shot is redirected only when a player's head is inside the FOV circle.
+-- The hit report aims through that head. Behind cover, it starts on their side of the wall.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.2"
+local VERSION = "1.3"
 
 local genv = _G
 pcall(function()
@@ -65,6 +66,7 @@ local function clearTarget()
     state.head = nil
     state.eye = nil
     state.root = nil
+    state.covered = false
     state.vel = Vector3.zero
     if circle then
         pcall(function()
@@ -621,6 +623,25 @@ local function camera()
     return workspace.CurrentCamera
 end
 
+local coverParams = RaycastParams.new()
+coverParams.FilterType = Enum.RaycastFilterType.Exclude
+coverParams.IgnoreWater = true
+
+-- True when a ray from our head does not reach their head first.
+-- That includes walls and a torso sitting in front of the head.
+local function blocksHead(eye, headPart, myChar)
+    if typeof(eye) ~= "Vector3" or not headPart then
+        return false
+    end
+    local delta = headPart.Position - eye
+    if delta.Magnitude < 0.05 then
+        return false
+    end
+    coverParams.FilterDescendantsInstances = { myChar }
+    local hit = workspace:Raycast(eye, delta, coverParams)
+    return hit ~= nil and hit.Instance ~= headPart
+end
+
 local function fovRadius(cam)
     local vp = cam.ViewportSize
     local view = math.rad(math.max(cam.FieldOfView, 1))
@@ -652,8 +673,8 @@ local function bestTarget(cam, radius)
     return bestPart
 end
 
--- Each gun sends its bullet speed on ProjectileRender. Aim where the head
--- will be when a bullet at that speed arrives.
+-- A reported point ahead of the head makes the server count a body shot.
+-- Always name the head center. Lead is only for the local bullet graphic.
 local function leadAt(origin, head, vel, speed)
     if typeof(head) ~= "Vector3" or typeof(origin) ~= "Vector3" then
         return head
@@ -670,6 +691,27 @@ local function leadAt(origin, head, vel, speed)
         point = head + vel * time
     end
     return point
+end
+
+-- Covered shots cannot start at our head: the server ray hits the wall, or
+-- their body, first. Start just outside their head so that short ray hits it.
+local function reportRay(eye, headPos, covered)
+    if typeof(eye) ~= "Vector3" or typeof(headPos) ~= "Vector3" then
+        return nil
+    end
+    local delta = headPos - eye
+    local dist = delta.Magnitude
+    if dist < 0.05 then
+        return nil
+    end
+    local origin = eye
+    if covered then
+        origin = headPos - delta * (2 / dist)
+    end
+    if (headPos - origin).Magnitude < 0.05 then
+        return nil
+    end
+    return origin, headPos
 end
 
 local function callPacked(callOld, self, method, args, argc)
@@ -721,9 +763,8 @@ local function onNamecall(self, ...)
     if argc < 7 or typeof(cf) ~= "CFrame" then
         return callOld(self, ...)
     end
-    local origin = state.eye
-    local aimPos = leadAt(origin, state.head, state.vel, state.speed)
-    if typeof(aimPos) ~= "Vector3" or (aimPos - origin).Magnitude < 0.05 then
+    local origin, aimPos = reportRay(state.eye, state.head, state.covered)
+    if not origin then
         return callOld(self, ...)
     end
     local args = { ... }
@@ -771,12 +812,14 @@ track(RunService.RenderStepped:Connect(function()
             state.vel = (hrp and hrp.AssemblyLinearVelocity) or Vector3.zero
             local from = state.root or cam.CFrame.Position
             state.aim = leadAt(from, state.head, state.vel, state.speed)
-            circle.Color = Color3.fromRGB(80, 255, 120)
+            state.covered = blocksHead(state.eye, part, myChar)
+            circle.Color = state.covered and Color3.fromRGB(255, 196, 40) or Color3.fromRGB(80, 255, 120)
         else
             state.aim = nil
             state.part = nil
             state.head = nil
             state.vel = Vector3.zero
+            state.covered = false
             circle.Color = WHITE
         end
     end)
@@ -831,7 +874,7 @@ if not hooked then
     MainBtn.Text = "NO"
     warn("[Silent] " .. tostring(why))
 else
-    print("[Silent v" .. VERSION .. "] ready. Circle is the FOV. Shots count only while a player is inside it.")
+    print("[Silent v" .. VERSION .. "] ready. Green is a clear head. Gold is behind cover, and that shot still reports the head.")
 end
 
 local function unload()
