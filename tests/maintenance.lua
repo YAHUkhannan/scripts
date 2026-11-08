@@ -356,10 +356,18 @@ check("silent capture preserves forwarding, nil arguments, and original/rewritte
     assert((origin-vector(0,2,100)).Magnitude<2.5, "covered shot must start just outside the head")
     assert(origin.Z>50, "covered shot must not start at our head")
     text=ping();assert(text:find("original ",1,true) and text:find("sent ",1,true) and text:find("Opponent.Head",1,true))
+    e.state.game="urban"
+    hook(checkShot,9,nil,3,4,oldCf,vector(1,2,3),inst("Wall"),8,nil)
+    assert(e.sent[1]==9 and e.sent[7].Name=="Wall", "urban mode must not rewrite another game")
+    e.state.game=nil
     reset()
     for i=1,100 do hook(finished,i) end
-    assert(capture.count==96 and capture.dropped==4)
-    text=ping();assert(text:find("Buffer overflow: 4",1,true))
+    assert(capture.count==1 and capture.dropped==0, "repeat calls must stay one group")
+    text=ping();assert(text:find("x100",1,true))
+    reset()
+    for i=1,70 do hook(inst("Other"..i, root), i) end
+    assert(capture.count==64 and capture.dropped==6)
+    text=ping();assert(text:find("Buffer overflow: 6",1,true))
     hook(finished,123);now=now+7;ping();assert(capture.pings[#capture.pings]:find("ProjectileFinished",1,true))
     hook(finished,123);now=now+16;ping();assert(capture.pings[#capture.pings]:find("No new",1,true))
     e.state.enabled=false

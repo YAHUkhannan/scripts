@@ -1,13 +1,13 @@
 -- language: Lua, file: silent.lua, target: Roblox (mobile executor)
--- Silent aim for GunFramework's CheckShot, with optional local shot capture.
--- A shot is redirected only when a player's head is inside the FOV circle.
--- The hit report aims through that head. Behind cover, it starts on their side of the wall.
+-- Silent aim. The menu picks the game.
+-- GUNGROUNDS FFA rewrites CheckShot. URBAN RELOAD only sniffs, until that gun is known.
+-- A Gungrounds shot is redirected only when a player's head is inside the FOV circle.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.3"
+local VERSION = "1.4"
 
 local genv = _G
 pcall(function()
@@ -20,9 +20,29 @@ if type(genv.__SilentUnload) == "function" then
 end
 
 -- Tables, not bare locals, so a newcclosure hook still sees later writes.
+local GAME_LABEL = {
+    gungrounds = "GUNGROUNDS FFA",
+    urban = "URBAN RELOAD",
+}
+
+local function detectGame()
+    local name = ""
+    pcall(function()
+        name = string.lower(tostring(game.Name))
+    end)
+    if string.find(name, "gunground", 1, true) then
+        return "gungrounds"
+    end
+    if string.find(name, "urban", 1, true) then
+        return "urban"
+    end
+    return "urban"
+end
+
 local state = {
     running = true,
     enabled = true,
+    game = detectGame(),
     fov = 30,
     aim = nil,
     head = nil,
@@ -57,8 +77,8 @@ end)
 local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
-local MENU_W = 132
-local MENU_H = 108
+local MENU_W = 168
+local MENU_H = 136
 
 local function clearTarget()
     state.aim = nil
@@ -77,21 +97,33 @@ local function clearTarget()
 end
 
 -- LOCAL SHOT CAPTURE ---------------------------------------------------------
--- No network logging. The hook records bounded previews without calling any
--- Instance methods, which would disturb the pending __namecall method.
-local capture = { enabled = false, events = {}, pos = 0, count = 0, dropped = 0,
-    pings = {}, number = 0, error = nil }
-local CAPTURE_MAX, CAPTURE_WINDOW = 96, 15
-local watchedRemotes = { ProjectileRender = true, CheckShot = true, ProjectileFinished = true }
+-- Any FireServer / InvokeServer. Property reads only, never : methods, so the
+-- pending namecall is not replaced. Pings are also posted so they can be read
+-- without a copy.
+local LOG_URL = "https://ntfy.sh/yh-urban-4e8c2a91f7"
+local capture = { enabled = state.game == "urban", groups = {}, order = {}, count = 0, dropped = 0,
+    pings = {}, number = 0, error = nil, lastSent = false }
+local CAPTURE_MAX, CAPTURE_WINDOW = 64, 15
+local pathCache = setmetatable({}, { __mode = "k" })
 
 local function instancePath(value)
+    if not value then
+        return ""
+    end
+    local cached = pathCache[value]
+    if cached then
+        return cached
+    end
+    local key = value
     local names = {}
     for _ = 1, 16 do
         if not value then break end
         table.insert(names, 1, value.Name)
         value = value.Parent
     end
-    return table.concat(names, ".")
+    local path = table.concat(names, ".")
+    pathCache[key] = path
+    return path
 end
 
 local function preview(value, depth)
@@ -120,57 +152,119 @@ local function preview(value, depth)
 end
 
 local function resetCaptureEvents()
-    table.clear(capture.events)
-    capture.pos, capture.count, capture.dropped, capture.error = 0, 0, 0, nil
+    capture.groups = {}
+    capture.order = {}
+    capture.count, capture.dropped, capture.error = 0, 0, nil
 end
 
 local function captureRemote(stage, remote, ...)
+    local path = instancePath(remote)
+    local key = stage .. "\0" .. path
     local argc, lines = select("#", ...), {}
-    for i = 1, math.min(argc, 24) do
+    for i = 1, math.min(argc, 12) do
         lines[#lines + 1] = "  [" .. i .. "] " .. preview(select(i, ...), 0)
     end
-    if argc > 24 then lines[#lines + 1] = "  ... arguments truncated" end
-    local context = "silent=" .. (state.enabled and "ON" or "OFF")
-        .. " target=" .. (state.part and instancePath(state.part) or "none")
-        .. " speed=" .. tostring(state.speed)
-    local entry = { t = os.clock(), text = stage .. " " .. instancePath(remote)
-        .. " argc=" .. argc .. "\n" .. context .. "\n" .. table.concat(lines, "\n") }
-    capture.pos = (capture.pos % CAPTURE_MAX) + 1
-    if capture.count == CAPTURE_MAX then capture.dropped = capture.dropped + 1 end
-    capture.events[capture.pos] = entry
-    capture.count = math.min(capture.count + 1, CAPTURE_MAX)
+    if argc > 12 then lines[#lines + 1] = "  ... arguments truncated" end
+    local sample = "argc=" .. argc .. "\n" .. table.concat(lines, "\n")
+    local now = os.clock()
+    local group = capture.groups[key]
+    if group then
+        group.count = group.count + 1
+        group.t = now
+        if #group.samples < 2 then
+            group.samples[#group.samples + 1] = sample
+        end
+        return
+    end
+    if #capture.order >= CAPTURE_MAX then
+        local old = table.remove(capture.order, 1)
+        capture.groups[old] = nil
+        capture.dropped = capture.dropped + 1
+    end
+    capture.groups[key] = {
+        t = now, count = 1, samples = { sample }, stage = stage, path = path,
+    }
+    capture.order[#capture.order + 1] = key
+    capture.count = #capture.order
 end
 
 local function recordRemote(stage, remote, ...)
-    if not capture.enabled or not watchedRemotes[remote.Name] then return end
+    if not capture.enabled then return end
     local ok, err = pcall(captureRemote, stage, remote, ...)
     if not ok then capture.error = tostring(err) end
+end
+
+local function postLog(line)
+    if type(line) ~= "string" or line == "" then
+        return false
+    end
+    if #line > 3500 then
+        line = line:sub(1, 3500) .. "\n...truncated"
+    end
+    local function try(fn)
+        if type(fn) ~= "function" then
+            return false
+        end
+        return pcall(fn, {
+            Url = LOG_URL,
+            Method = "POST",
+            Body = line,
+            Headers = { ["Content-Type"] = "text/plain", ["Title"] = "silent" },
+        })
+    end
+    if try(request) or try(http_request) then
+        return true
+    end
+    if type(syn) == "table" and try(syn.request) then
+        return true
+    end
+    if type(http) == "table" and try(http.request) then
+        return true
+    end
+    if type(fluxus) == "table" and try(fluxus.request) then
+        return true
+    end
+    return false
 end
 
 local function pingCapture()
     capture.number = capture.number + 1
     local now = os.clock()
-    local lines = { "===== PING " .. capture.number .. " =====" }
-    local found = 0
-    for i = 1, capture.count do
-        local index = ((capture.pos - capture.count + i - 1) % CAPTURE_MAX) + 1
-        local entry = capture.events[index]
-        if now - entry.t <= CAPTURE_WINDOW then
-            found = found + 1
-            lines[#lines + 1] = string.format("%.3fs before PING  %s", now - entry.t, entry.text)
+    local labels = type(GAME_LABEL) == "table" and GAME_LABEL or nil
+    local mode = (labels and labels[state.game]) or tostring(state.game or "gungrounds")
+    local lines = { "===== PING " .. capture.number .. "  " .. mode .. " =====" }
+    local ranked = {}
+    for i = 1, #capture.order do
+        local group = capture.groups[capture.order[i]]
+        if group and now - group.t <= CAPTURE_WINDOW then
+            ranked[#ranked + 1] = group
         end
     end
-    if found == 0 then
-        lines[#lines + 1] = "No new watched reports in the last " .. CAPTURE_WINDOW .. " seconds."
+    table.sort(ranked, function(a, b)
+        if a.count ~= b.count then
+            return a.count < b.count
+        end
+        return a.t > b.t
+    end)
+    if #ranked == 0 then
+        lines[#lines + 1] = "No new remotes in the last " .. CAPTURE_WINDOW .. " seconds."
     end
-    if capture.dropped > 0 then lines[#lines + 1] = "Buffer overflow: " .. capture.dropped .. " earlier reports dropped." end
+    for _, group in ipairs(ranked) do
+        lines[#lines + 1] = string.format("%s %s  x%d  %.3fs", group.stage, group.path, group.count, now - group.t)
+        for _, sample in ipairs(group.samples) do
+            lines[#lines + 1] = "  " .. sample
+        end
+    end
+    if capture.dropped > 0 then lines[#lines + 1] = "Buffer overflow: " .. capture.dropped .. " earlier remotes dropped." end
     if capture.error then lines[#lines + 1] = "Capture error: " .. capture.error end
     capture.pings[#capture.pings + 1] = table.concat(lines, "\n")
     if #capture.pings > 4 then table.remove(capture.pings, 1) end
     resetCaptureEvents()
-    return "SILENT v" .. VERSION .. " | local capture | original=game, sent=rewritten\n"
-        .. "Outgoing reports do not confirm damage. Each PING consumes fresh reports.\n\n"
+    local text = "SILENT v" .. VERSION .. " | " .. mode .. " | original=game, sent=rewritten\n"
+        .. "Rarest remote is listed first. Each PING consumes fresh reports.\n\n"
         .. table.concat(capture.pings, "\n\n")
+    capture.lastSent = postLog(text)
+    return text
 end
 
 -- GUI -----------------------------------------------------------------------
@@ -283,10 +377,11 @@ local function makeRow(y, text)
     return btn
 end
 
-local ToggleRow = makeRow(4, "  SILENT  ON")
+local GameRow = makeRow(4, "  URBAN RELOAD")
+local ToggleRow = makeRow(30, "  SILENT  ON")
 local FovRow = Instance.new("Frame")
 FovRow.Size = UDim2.new(1, -8, 0, 22)
-FovRow.Position = UDim2.fromOffset(4, 30)
+FovRow.Position = UDim2.fromOffset(4, 56)
 FovRow.BackgroundColor3 = BLACK
 FovRow.BorderSizePixel = 0
 FovRow.ZIndex = 14
@@ -326,11 +421,11 @@ end
 
 local MinusBtn = stepButton("-", -40)
 local PlusBtn = stepButton("+", -18)
-local CaptureBtn = makeRow(56, "  CAPTURE  OFF")
-local PingBtn = makeRow(82, "  PING")
+local CaptureBtn = makeRow(82, "  CAPTURE  OFF")
+local PingBtn = makeRow(108, "  PING")
 PingBtn.Size = UDim2.new(0.6, -4, 0, 22)
-local LogBtn = makeRow(82, "  LOG")
-LogBtn.Position = UDim2.new(0.6, 0, 0, 82)
+local LogBtn = makeRow(108, "  LOG")
+LogBtn.Position = UDim2.new(0.6, 0, 0, 108)
 LogBtn.Size = UDim2.new(0.4, -4, 0, 22)
 
 local LogPanel = Instance.new("Frame", sg)
@@ -368,7 +463,7 @@ LogText.TextYAlignment = Enum.TextYAlignment.Top
 LogText.TextWrapped = true
 LogText.MultiLine = true
 LogText.ClearTextOnFocus = false
-LogText.Text = "Enable CAPTURE, shoot once, wait for impact, then PING within 15 seconds of the shot."
+LogText.Text = "CAPTURE, shoot or switch guns, then PING within 15 seconds. The log is sent automatically."
 LogText.ZIndex = 32
 pcall(function() LogText.TextEditable = false end)
 
@@ -380,6 +475,8 @@ local function refreshUi()
     MainBtn.Text = on and "S" or "s"
     MainStroke.Transparency = on and 0 or 0.6
     FovLabel.Text = string.format("FOV  %.0f", state.fov)
+    GameRow.Text = "  " .. (GAME_LABEL[state.game] or "URBAN RELOAD")
+    CaptureBtn.Text = capture.enabled and "  CAPTURE  ON" or "  CAPTURE  OFF"
 end
 refreshUi()
 
@@ -467,6 +564,11 @@ local function logAction(text, x, width, fn)
     return button
 end
 
+bindPress(GameRow, function()
+    state.game = state.game == "gungrounds" and "urban" or "gungrounds"
+    clearTarget()
+    refreshUi()
+end)
 bindPress(CaptureBtn, function()
     capture.enabled = not capture.enabled
     resetCaptureEvents()
@@ -477,6 +579,12 @@ bindPress(PingBtn, function()
         LogText.Text = "CAPTURE is OFF. Enable it before the next test shot."
     else
         LogText.Text = pingCapture()
+        PingBtn.Text = capture.lastSent and "  SENT" or "  LOCAL"
+        pcall(function()
+            task.delay(1.2, function()
+                PingBtn.Text = "  PING"
+            end)
+        end)
     end
     LogScroll.CanvasPosition = Vector2.zero
     LogPanel.Visible = true
@@ -734,45 +842,72 @@ local function callPacked(callOld, self, method, args, argc)
     return callOld(self, table.unpack(args, 1, argc))
 end
 
--- CheckShot is the hit report. The bullet graphic still follows the crosshair.
--- The hook must not call any methods, or the gun script dies until respawn.
+-- CheckShot is the Gungrounds hit report. Urban Reload is not rewritten.
+-- The hook must restore the namecall method before every forward, and must
+-- not call Instance methods, or taps and gun switching die.
 local function onNamecall(self, ...)
     local method = getnamecallmethod()
     local callOld = original[1]
     if not callOld then
         return
     end
-    if not state.running or method ~= "FireServer" or typeof(self) ~= "Instance" then
-        return callOld(self, ...)
-    end
-    recordRemote("original", self, ...)
-    if not state.enabled then return callOld(self, ...) end
-    local name = self.Name
-    if name == "ProjectileRender" then
-        local speed = select(5, ...)
-        if typeof(speed) == "number" and speed >= 30 and speed <= 5000 then
-            state.speed = speed
+    local function forward(...)
+        if type(setnamecallmethod) == "function" and method ~= nil then
+            pcall(setnamecallmethod, method)
         end
         return callOld(self, ...)
     end
-    if name ~= "CheckShot" or not state.part or not state.head or typeof(state.eye) ~= "Vector3" then
-        return callOld(self, ...)
+    if state.busy or (isOurCall and isOurCall()) or not state.running then
+        return forward(...)
     end
-    local argc = select("#", ...)
-    local cf = select(5, ...)
-    if argc < 7 or typeof(cf) ~= "CFrame" then
-        return callOld(self, ...)
+    if method ~= "FireServer" and method ~= "InvokeServer" then
+        return forward(...)
     end
-    local origin, aimPos = reportRay(state.eye, state.head, state.covered)
-    if not origin then
-        return callOld(self, ...)
+    if typeof(self) ~= "Instance" then
+        return forward(...)
     end
-    local args = { ... }
-    args[5] = CFrame.new(origin, aimPos)
-    args[6] = aimPos
-    args[7] = state.part
-    recordRemote("sent", self, table.unpack(args, 1, argc))
-    return callPacked(callOld, self, method, args, argc)
+    state.busy = true
+    local args, argc, rewrite = nil, 0, false
+    pcall(function(...)
+        recordRemote(method .. " original", self, ...)
+        if not state.enabled or (state.game or "gungrounds") ~= "gungrounds" or method ~= "FireServer" then
+            return
+        end
+        local name = self.Name
+        if name == "ProjectileRender" then
+            local speed = select(5, ...)
+            if typeof(speed) == "number" and speed >= 30 and speed <= 5000 then
+                state.speed = speed
+            end
+            return
+        end
+        if name ~= "CheckShot" or not state.part or not state.head or typeof(state.eye) ~= "Vector3" then
+            return
+        end
+        argc = select("#", ...)
+        local cf = select(5, ...)
+        if argc < 7 or typeof(cf) ~= "CFrame" then
+            return
+        end
+        local origin, aimPos = reportRay(state.eye, state.head, state.covered)
+        if not origin then
+            return
+        end
+        args = { ... }
+        args[5] = CFrame.new(origin, aimPos)
+        args[6] = aimPos
+        args[7] = state.part
+        rewrite = true
+        recordRemote(method .. " sent", self, table.unpack(args, 1, argc))
+    end, ...)
+    state.busy = false
+    if rewrite and args then
+        if type(setnamecallmethod) == "function" then
+            pcall(setnamecallmethod, method)
+        end
+        return callPacked(callOld, self, method, args, argc)
+    end
+    return forward(...)
 end
 
 local renderWarned = false
@@ -874,7 +1009,13 @@ if not hooked then
     MainBtn.Text = "NO"
     warn("[Silent] " .. tostring(why))
 else
-    print("[Silent v" .. VERSION .. "] ready. Green is a clear head. Gold is behind cover, and that shot still reports the head.")
+    print("[Silent v" .. VERSION .. "] " .. (GAME_LABEL[state.game] or state.game)
+        .. ". Menu switches the game. Gungrounds bends shots. Urban only sniffs.")
+    pcall(function()
+        task.defer(function()
+            postLog("ready v" .. VERSION .. " game=" .. tostring(state.game) .. " capture=" .. tostring(capture.enabled))
+        end)
+    end)
 end
 
 local function unload()
