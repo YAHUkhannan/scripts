@@ -377,6 +377,35 @@ check("silent capture preserves forwarding, nil arguments, and original/rewritte
     ping();assert(#capture.pings==4)
 end)
 
+check("urban sniffer hooks only remote methods, forwards yields, and is idle until capture", function()
+    local hooked, recorded, forwarded = {}, 0, 0
+    local fire, invoke = function() end, function() end
+    local replacements = {}
+    local e = env({state={running=true,game="urban"}, capture={enabled=false}, typeof=function() return "Instance" end,
+        Instance={new=function(kind)
+            return {FireServer=fire, InvokeServer=invoke, Destroy=function() end}
+        end},
+        recordRemote=function() recorded=recorded+1 end,
+        hookfunction=function(target, replacement)
+            hooked[#hooked+1]=target; replacements[target]=replacement
+            return function(...) forwarded=forwarded+1; return "ok", ... end
+        end})
+    e.installSniffHook=nil
+    local install=compile(section(silent,"installSniffHook = function()","local hooked, why = true").."\nreturn installSniffHook",e)
+    local ok=install(); assert(ok and #hooked>=2 and e.state.sniffHooked)
+    assert(replacements[fire] and replacements[invoke], "FireServer and InvokeServer must be hooked, nothing else")
+    local r=replacements[fire]({}, 1, nil, 3)
+    assert(r=="ok" and forwarded==1 and recorded==0, "capture off must only forward")
+    e.capture.enabled=true
+    replacements[invoke]({}, 7)
+    assert(forwarded==2 and recorded==1)
+    e.state.game="gungrounds"
+    replacements[fire]({}, 1)
+    assert(forwarded==3 and recorded==1, "gungrounds mode must not record twice")
+    e.hookfunction=nil; e.state.sniffHooked=false
+    local bad, why=install(); assert(bad==false and why=="no hookfunction")
+end)
+
 check("corner boxes stay thin, fade at distance, and yield to tiny skeletons", function()
     local allocations, releases=0,0
     local e=env({SETTINGS={Skeleton=true},BOX_COLOR={},Vector2=vectors,

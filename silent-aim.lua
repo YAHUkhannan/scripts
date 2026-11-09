@@ -53,6 +53,8 @@ local state = {
 local original = {}
 local conns = {}
 local namecallBridge = nil
+local ensureGameHook = nil
+local installSniffHook = nil
 local circle = nil
 
 local function track(conn)
@@ -78,7 +80,7 @@ local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
 local MENU_W = 168
-local MENU_H = 136
+local MENU_H = 162
 
 local function clearTarget()
     state.aim = nil
@@ -101,7 +103,7 @@ end
 -- pending namecall is not replaced. Pings are also posted so they can be read
 -- without a copy.
 local LOG_URL = "https://ntfy.sh/yh-urban-4e8c2a91f7"
-local capture = { enabled = state.game == "urban", groups = {}, order = {}, count = 0, dropped = 0,
+local capture = { enabled = false, groups = {}, order = {}, count = 0, dropped = 0,
     pings = {}, number = 0, error = nil, lastSent = false }
 local CAPTURE_MAX, CAPTURE_WINDOW = 64, 15
 local pathCache = setmetatable({}, { __mode = "k" })
@@ -227,6 +229,32 @@ local function postLog(line)
     return false
 end
 
+-- ntfy rejects bodies over 4096 bytes, so long text goes out in pieces.
+local function postText(text)
+    local pieces, current = {}, ""
+    for line in (tostring(text) .. "\n"):gmatch("(.-)\n") do
+        if #current + #line + 1 > 3300 and current ~= "" then
+            pieces[#pieces + 1] = current
+            current = ""
+        end
+        current = current .. line:sub(1, 3200) .. "\n"
+    end
+    if current ~= "" then
+        pieces[#pieces + 1] = current
+    end
+    local first = false
+    for i, piece in ipairs(pieces) do
+        local ok = postLog(piece)
+        if i == 1 then
+            first = ok
+        end
+        if i < #pieces and task then
+            pcall(task.wait, 0.4)
+        end
+    end
+    return first
+end
+
 local function pingCapture()
     capture.number = capture.number + 1
     local now = os.clock()
@@ -263,7 +291,7 @@ local function pingCapture()
     local text = "SILENT v" .. VERSION .. " | " .. mode .. " | original=game, sent=rewritten\n"
         .. "Rarest remote is listed first. Each PING consumes fresh reports.\n\n"
         .. table.concat(capture.pings, "\n\n")
-    capture.lastSent = postLog(text)
+    capture.lastSent = postText(capture.pings[#capture.pings])
     return text
 end
 
@@ -422,6 +450,7 @@ end
 local MinusBtn = stepButton("-", -40)
 local PlusBtn = stepButton("+", -18)
 local CaptureBtn = makeRow(82, "  CAPTURE  OFF")
+local ScanBtn = makeRow(134, "  SCAN")
 local PingBtn = makeRow(108, "  PING")
 PingBtn.Size = UDim2.new(0.6, -4, 0, 22)
 local LogBtn = makeRow(108, "  LOG")
@@ -469,7 +498,11 @@ pcall(function() LogText.TextEditable = false end)
 
 local function refreshUi()
     local on = state.enabled
-    ToggleRow.Text = "  SILENT v" .. VERSION .. (on and "  ON" or "  OFF")
+    if state.game == "gungrounds" then
+        ToggleRow.Text = "  SILENT v" .. VERSION .. (on and "  ON" or "  OFF")
+    else
+        ToggleRow.Text = "  SNIFF ONLY v" .. VERSION
+    end
     ToggleRow.BackgroundColor3 = on and WHITE or BLACK
     ToggleRow.TextColor3 = on and BLACK or WHITE
     MainBtn.Text = on and "S" or "s"
@@ -567,12 +600,144 @@ end
 bindPress(GameRow, function()
     state.game = state.game == "gungrounds" and "urban" or "gungrounds"
     clearTarget()
+    if state.game == "gungrounds" and ensureGameHook then
+        local ok, why = ensureGameHook()
+        if not ok then
+            MainBtn.Text = "NO"
+            LogText.Text = "Gungrounds needs a namecall hook: " .. tostring(why)
+        end
+    end
     refreshUi()
 end)
+
+-- Reads the gun's own scripts. No hook is installed, so the game is untouched.
+local function scanGame()
+    local mode = GAME_LABEL[state.game] or tostring(state.game)
+    local out = { "===== SCAN  " .. mode .. " =====" }
+    local function add(text) out[#out + 1] = text end
+    local remoteClass = { RemoteEvent = true, RemoteFunction = true, UnreliableRemoteEvent = true }
+    local scriptClass = { LocalScript = true, ModuleScript = true, Script = true }
+    local gunWord = { "gun", "weapon", "shoot", "fire", "projectile", "bullet", "ammo", "reload", "combat", "tool" }
+
+    local function grep(script, limit)
+        if type(decompile) ~= "function" then
+            return nil
+        end
+        local ok, src = pcall(decompile, script)
+        if not ok or type(src) ~= "string" then
+            return nil
+        end
+        local hits, n = {}, 0
+        for line in (src .. "\n"):gmatch("(.-)\n") do
+            n = n + 1
+            if line:find("FireServer", 1, true) or line:find("InvokeServer", 1, true) then
+                hits[#hits + 1] = string.format("    %d: %s", n, line:gsub("^%s+", ""):sub(1, 140))
+                if #hits >= limit then
+                    break
+                end
+            end
+        end
+        return hits
+    end
+
+    local function describe(script)
+        add("  " .. script.ClassName .. " " .. instancePath(script))
+        local hits = grep(script, 8)
+        if hits == nil then
+            add("    (no decompile on this executor)")
+        elseif #hits == 0 then
+            add("    (no remote calls found)")
+        else
+            for _, h in ipairs(hits) do add(h) end
+        end
+    end
+
+    local tools = {}
+    local function addTools(container)
+        if not container then return end
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("Tool") then
+                tools[#tools + 1] = child
+            end
+        end
+    end
+    local char = LocalPlayer.Character
+    addTools(char)
+    addTools(LocalPlayer:FindFirstChildOfClass("Backpack"))
+    add("Tools: " .. #tools .. " (equipped first)")
+    for i = 1, math.min(#tools, 4) do
+        local tool = tools[i]
+        add("TOOL " .. instancePath(tool) .. (tool.Parent == char and "  [equipped]" or ""))
+        local seen = 0
+        for _, d in ipairs(tool:GetDescendants()) do
+            if remoteClass[d.ClassName] then
+                add("  " .. d.ClassName .. " " .. instancePath(d))
+            elseif scriptClass[d.ClassName] and seen < 6 then
+                seen = seen + 1
+                describe(d)
+            end
+        end
+    end
+
+    local storage = game:GetService("ReplicatedStorage")
+    local remotes, modules = {}, {}
+    for _, d in ipairs(storage:GetDescendants()) do
+        if remoteClass[d.ClassName] then
+            remotes[#remotes + 1] = d.ClassName .. " " .. instancePath(d)
+        elseif d.ClassName == "ModuleScript" and #modules < 6 then
+            local lower = d.Name:lower()
+            for _, word in ipairs(gunWord) do
+                if lower:find(word, 1, true) then
+                    modules[#modules + 1] = d
+                    break
+                end
+            end
+        end
+    end
+    add("ReplicatedStorage remotes: " .. #remotes)
+    for i = 1, math.min(#remotes, 80) do add("  " .. remotes[i]) end
+    if #remotes > 80 then add("  ... " .. (#remotes - 80) .. " more") end
+    add("Gun-looking modules: " .. #modules)
+    for _, m in ipairs(modules) do describe(m) end
+    return table.concat(out, "\n")
+end
+
+bindPress(ScanBtn, function()
+    LogText.Text = "Scanning..."
+    LogPanel.Visible = true
+    task.spawn(function()
+        local ok, text = pcall(scanGame)
+        if not ok then
+            text = "Scan failed: " .. tostring(text)
+        end
+        LogText.Text = text
+        ScanBtn.Text = postText(text) and "  SENT" or "  LOCAL"
+        task.delay(1.2, function()
+            ScanBtn.Text = "  SCAN"
+        end)
+    end)
+end)
+
 bindPress(CaptureBtn, function()
-    capture.enabled = not capture.enabled
+    if capture.enabled then
+        capture.enabled = false
+        resetCaptureEvents()
+        refreshUi()
+        return
+    end
+    if state.game == "urban" and installSniffHook then
+        local ok, why = installSniffHook()
+        if not ok then
+            LogText.Text = "CAPTURE needs hookfunction, and this executor has none: " .. tostring(why)
+                .. "\nSCAN still works and installs no hook."
+            LogPanel.Visible = true
+            CaptureBtn.Text = "  NO HOOK"
+            return
+        end
+    end
+    capture.enabled = true
     resetCaptureEvents()
-    CaptureBtn.Text = capture.enabled and "  CAPTURE  ON" or "  CAPTURE  OFF"
+    refreshUi()
 end)
 bindPress(PingBtn, function()
     if not capture.enabled then
@@ -922,7 +1087,7 @@ track(RunService.RenderStepped:Connect(function()
         if not circle or not cam then
             return
         end
-        if not state.enabled then
+        if not state.enabled or (state.game or "gungrounds") ~= "gungrounds" then
             circle.Visible = false
             state.aim = nil
             return
@@ -1004,13 +1169,62 @@ local function installHook()
     return true
 end
 
-local hooked, why = installHook()
+ensureGameHook = installHook
+
+-- Urban Reload: hook only the two remote methods, never every game call.
+-- A hook on all namecalls sits in the path of WaitForChild and other yielding
+-- calls, which is the likely reason equipping the gun broke.
+installSniffHook = function()
+    if state.sniffHooked then
+        return true
+    end
+    if type(hookfunction) ~= "function" then
+        return false, "no hookfunction"
+    end
+    local ok, err = pcall(function()
+        local function wrap(target)
+            local old
+            old = hookfunction(target, function(self, ...)
+                if capture.enabled and state.running and state.game == "urban"
+                    and not (isOurCall and isOurCall()) and typeof(self) == "Instance" then
+                    pcall(recordRemote, "call", self, ...)
+                end
+                return old(self, ...)
+            end)
+            return old
+        end
+        local event = Instance.new("RemoteEvent")
+        local func = Instance.new("RemoteFunction")
+        local ok1 = pcall(wrap, event.FireServer)
+        local ok2 = pcall(wrap, func.InvokeServer)
+        local ok3 = pcall(function()
+            local unreliable = Instance.new("UnreliableRemoteEvent")
+            wrap(unreliable.FireServer)
+            unreliable:Destroy()
+        end)
+        event:Destroy()
+        func:Destroy()
+        if not ok1 and not ok2 and not ok3 then
+            error("hookfunction rejected every remote method")
+        end
+    end)
+    if not ok then
+        return false, tostring(err)
+    end
+    state.sniffHooked = true
+    return true
+end
+
+local hooked, why = true, nil
+if state.game == "gungrounds" then
+    hooked, why = installHook()
+end
 if not hooked then
     MainBtn.Text = "NO"
     warn("[Silent] " .. tostring(why))
 else
     print("[Silent v" .. VERSION .. "] " .. (GAME_LABEL[state.game] or state.game)
-        .. ". Menu switches the game. Gungrounds bends shots. Urban only sniffs.")
+        .. ". Nothing is hooked until you use CAPTURE (Urban) or pick Gungrounds. SCAN never hooks.")
     pcall(function()
         task.defer(function()
             postLog("ready v" .. VERSION .. " game=" .. tostring(state.game) .. " capture=" .. tostring(capture.enabled))
