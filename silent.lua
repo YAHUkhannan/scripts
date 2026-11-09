@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.8"
+local VERSION = "1.9"
 
 local genv = _G
 pcall(function()
@@ -774,24 +774,29 @@ local function scanGame(progress)
             return a.path < b.path
         end)
         local started = os.clock()
-        local checked, matched, stopped = 0, 0, nil
+        local checked, matched, unreadable, stopped = 0, 0, 0, nil
         for i, entry in ipairs(candidates) do
-            if checked >= 80 then stopped = "80 scripts"; break end
-            if matched >= 12 then stopped = "12 matches"; break end
-            if os.clock() - started > 15 then stopped = "15 seconds"; break end
+            if checked >= 330 then stopped = "330 scripts"; break end
+            if matched >= 30 then stopped = "30 matches"; break end
+            if os.clock() - started > 40 then stopped = "40 seconds"; break end
             checked = checked + 1
             if progress then
                 progress(string.format("Scanning %d/%d  %s", i, #candidates, entry.script.Name))
             end
             local strings, hasRemote = constants(entry.script)
-            if strings and (hasRemote or entry.rank == 0) and #strings > 0 then
+            if strings == nil then
+                unreadable = unreadable + 1
+                if entry.rank == 0 then
+                    add("SCRIPT [" .. entry.source .. "] " .. entry.path .. "  (could not read)")
+                end
+            elseif hasRemote or entry.rank == 0 then
                 matched = matched + 1
                 add("SCRIPT [" .. entry.source .. "] " .. entry.path .. (hasRemote and "  (calls a remote)" or ""))
-                add("  " .. table.concat(strings, " | "))
+                add("  " .. (#strings > 0 and table.concat(strings, " | ") or "(no matching strings)"))
             end
-            task.wait(0.05)
+            task.wait(0.03)
         end
-        add(string.format("Checked %d of %d scripts; listed %d.", checked, #candidates, matched))
+        add(string.format("Checked %d of %d scripts; listed %d; unreadable %d.", checked, #candidates, matched, unreadable))
         if stopped then add("Stopped early at " .. stopped .. ".") end
     end
     return table.concat(out, "\n")
