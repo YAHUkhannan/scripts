@@ -1,13 +1,14 @@
 -- language: Lua, file: silent.lua, target: Roblox (mobile executor)
 -- Silent aim. The menu picks the game.
--- GUNGROUNDS FFA rewrites CheckShot. URBAN RELOAD only sniffs, until that gun is known.
--- A Gungrounds shot is redirected only when a player's head is inside the FOV circle.
+-- GUNGROUNDS FFA rewrites CheckShot. URBAN RELOAD rewrites Remotes.Fire.
+-- A shot is redirected only when a player's head is inside the FOV circle.
+-- Nothing is printed: Urban Reload uploads the client console to its server.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.3"
+local VERSION = "2.4"
 
 local genv = _G
 pcall(function()
@@ -81,7 +82,7 @@ local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
 local MENU_W = 168
-local MENU_H = 162
+local MENU_H = 108
 
 local function clearTarget()
     state.aim = nil
@@ -261,7 +262,7 @@ local function pingCapture()
     local now = os.clock()
     local labels = type(GAME_LABEL) == "table" and GAME_LABEL or nil
     local mode = (labels and labels[state.game]) or tostring(state.game or "gungrounds")
-    local lines = { "===== PING " .. capture.number .. "  " .. mode .. " =====" }
+    local lines = { "===== REPORT " .. capture.number .. "  " .. mode .. " =====" }
     if state.game == "urban" then
         lines[#lines + 1] = "aim=" .. tostring(state.urbanAim) .. " target=" .. tostring(state.part ~= nil)
             .. " covered=" .. tostring(state.covered) .. " by=" .. tostring(state.coverBy)
@@ -317,11 +318,12 @@ local function pingCapture()
     end
     if capture.dropped > 0 then lines[#lines + 1] = "Buffer overflow: " .. capture.dropped .. " earlier remotes dropped." end
     if capture.error then lines[#lines + 1] = "Capture error: " .. capture.error end
+    if state.lastError then lines[#lines + 1] = "Script error: " .. state.lastError end
     capture.pings[#capture.pings + 1] = table.concat(lines, "\n")
     if #capture.pings > 4 then table.remove(capture.pings, 1) end
     resetCaptureEvents()
     local text = "SILENT v" .. VERSION .. " | " .. mode .. " | original=game, sent=rewritten\n"
-        .. "Rarest remote is listed first. Each PING consumes fresh reports.\n\n"
+        .. "Rarest remote is listed first. Each REPORT consumes fresh calls.\n\n"
         .. table.concat(capture.pings, "\n\n")
     capture.lastSent = postText(capture.pings[#capture.pings])
     return text
@@ -481,13 +483,7 @@ end
 
 local MinusBtn = stepButton("-", -40)
 local PlusBtn = stepButton("+", -18)
-local CaptureBtn = makeRow(82, "  CAPTURE  OFF")
-local ScanBtn = makeRow(134, "  SCAN")
-local PingBtn = makeRow(108, "  PING")
-PingBtn.Size = UDim2.new(0.6, -4, 0, 22)
-local LogBtn = makeRow(108, "  LOG")
-LogBtn.Position = UDim2.new(0.6, 0, 0, 108)
-LogBtn.Size = UDim2.new(0.4, -4, 0, 22)
+local ReportBtn = makeRow(82, "  REPORT")
 
 local LogPanel = Instance.new("Frame", sg)
 LogPanel.Name = "ShotCapture"
@@ -524,25 +520,22 @@ LogText.TextYAlignment = Enum.TextYAlignment.Top
 LogText.TextWrapped = true
 LogText.MultiLine = true
 LogText.ClearTextOnFocus = false
-LogText.Text = "CAPTURE, shoot or switch guns, then PING within 15 seconds. The log is sent automatically."
+LogText.Text = ""
 LogText.ZIndex = 32
 pcall(function() LogText.TextEditable = false end)
 
 local function refreshUi()
     local on = state.enabled
-    if state.game == "gungrounds" then
-        ToggleRow.Text = "  SILENT v" .. VERSION .. (on and "  ON" or "  OFF")
-    else
+    if state.game ~= "gungrounds" then
         on = state.urbanAim
-        ToggleRow.Text = "  AIM v" .. VERSION .. (on and "  ON" or "  OFF")
     end
+    ToggleRow.Text = "  AIM v" .. VERSION .. (on and "  ON" or "  OFF")
     ToggleRow.BackgroundColor3 = on and WHITE or BLACK
     ToggleRow.TextColor3 = on and BLACK or WHITE
     MainBtn.Text = on and "S" or "s"
     MainStroke.Transparency = on and 0 or 0.6
     FovLabel.Text = string.format("FOV  %.0f", state.fov)
     GameRow.Text = "  " .. (GAME_LABEL[state.game] or "URBAN RELOAD")
-    CaptureBtn.Text = capture.enabled and "  CAPTURE  ON" or "  CAPTURE  OFF"
 end
 refreshUi()
 
@@ -633,276 +626,37 @@ end
 bindPress(GameRow, function()
     state.game = state.game == "gungrounds" and "urban" or "gungrounds"
     clearTarget()
-    if state.game == "gungrounds" and ensureGameHook then
-        local ok, why = ensureGameHook()
+    local install = state.game == "gungrounds" and ensureGameHook or installSniffHook
+    if install then
+        local ok, why = install()
         if not ok then
             MainBtn.Text = "NO"
-            LogText.Text = "Gungrounds needs a namecall hook: " .. tostring(why)
+            state.lastError = "hook: " .. tostring(why)
         end
     end
     refreshUi()
 end)
 
--- Reads the gun's own scripts. No hook is installed, so the game is untouched.
-local function scanGame(progress)
-    local mode = GAME_LABEL[state.game] or tostring(state.game)
-    local out = { "===== DEEP SCAN  " .. mode .. " =====" }
-    local function add(text) out[#out + 1] = text end
-    local remoteClass = { RemoteEvent = true, RemoteFunction = true, UnreliableRemoteEvent = true }
-    local scriptClass = { LocalScript = true, ModuleScript = true, Script = true }
-    local gunWord = { "gun", "weapon", "shoot", "fire", "projectile", "bullet", "ammo", "reload", "combat", "tool" }
-
-    local candidates, seen = {}, setmetatable({}, { __mode = "k" })
-    local defaultScripts = { "PlayerModule", "RbxCharacterSounds", "BubbleChat", "ChatScript",
-        "PlayerScriptsLoader", "ControlModule", "CameraModule", "AnimateScript" }
-    local sourceRank = { ReplicatedStorage = 1, PlayerScripts = 2, Character = 3, Backpack = 3, loaded = 5 }
-    local function candidate(script, source)
-        if not script or seen[script] or not scriptClass[script.ClassName] then return end
-        seen[script] = true
-        local path = instancePath(script)
-        for _, name in ipairs(defaultScripts) do
-            if path:find(name, 1, true) then return end
-        end
-        local rank = sourceRank[source] or 4
-        local lowerName = script.Name:lower()
-        for _, word in ipairs(gunWord) do
-            if lowerName:find(word, 1, true) then
-                rank = 0
-                break
-            end
-        end
-        candidates[#candidates + 1] = { script = script, source = source, rank = rank, path = path }
+-- One button: sends the last 15 seconds of remote calls and the current target.
+bindPress(ReportBtn, function()
+    local text = pingCapture()
+    LogText.Text = text
+    ReportBtn.Text = capture.lastSent and "  SENT" or "  NOT SENT"
+    if not capture.lastSent then
+        LogScroll.CanvasPosition = Vector2.zero
+        LogPanel.Visible = true
     end
-    local function descendants(container, source)
-        if not container then return end
-        for _, d in ipairs(container:GetDescendants()) do
-            candidate(d, source)
-        end
-    end
-
-    -- PlayerScripts is where Urban Reload keeps its gun controller. Also scan
-    -- character/backpack scripts and every loaded module the executor exposes.
-    descendants(LocalPlayer:FindFirstChild("PlayerScripts"), "PlayerScripts")
-    descendants(LocalPlayer.Character, "Character")
-    descendants(LocalPlayer:FindFirstChildOfClass("Backpack"), "Backpack")
-    if type(getloadedmodules) == "function" then
-        local ok, loaded = pcall(getloadedmodules)
-        if ok and type(loaded) == "table" then
-            for _, module in ipairs(loaded) do candidate(module, "loaded") end
-        end
-    end
-
-    local closure = type(getscriptclosure) == "function" and getscriptclosure
-        or (type(getscriptfunction) == "function" and getscriptfunction or nil)
-    local getconstantsFn = type(getconstants) == "function" and getconstants
-        or (type(debug) == "table" and type(debug.getconstants) == "function" and debug.getconstants or nil)
-    local getprotosFn = type(getprotos) == "function" and getprotos
-        or (type(debug) == "table" and type(debug.getprotos) == "function" and debug.getprotos or nil)
-    local interesting = { "fire", "hit", "shoot", "reload", "ray", "remote", "damage", "bullet",
-        "gun", "weapon", "spread", "recoil", "head", "muzzle", "ammo" }
-
-    -- Reads string constants only. Nothing is decompiled.
-    -- Returns the relevant strings and whether a remote call name was present.
-    local function constants(script)
-        if not closure or not getconstantsFn then return nil end
-        local okFn, root = pcall(closure, script)
-        if not okFn or type(root) ~= "function" then return nil end
-        local found, used, hasRemote, protos = {}, {}, false, 0
-        local function visit(fn, depth)
-            local okC, values = pcall(getconstantsFn, fn)
-            if okC and type(values) == "table" then
-                for _, value in ipairs(values) do
-                    if type(value) == "string" and #value <= 60 then
-                        if value == "FireServer" or value == "InvokeServer" then
-                            hasRemote = true
-                        end
-                        local lower = value:lower()
-                        for _, word in ipairs(interesting) do
-                            if lower:find(word, 1, true) then
-                                local clean = value:gsub("%c", " ")
-                                if not used[clean] and #found < 40 then
-                                    used[clean] = true
-                                    found[#found + 1] = clean
-                                end
-                                break
-                            end
-                        end
-                    end
-                end
-            end
-            if getprotosFn and depth < 3 and protos < 60 then
-                local okP, children = pcall(getprotosFn, fn)
-                if okP and type(children) == "table" then
-                    for _, child in ipairs(children) do
-                        protos = protos + 1
-                        if protos > 60 then break end
-                        if type(child) == "function" then visit(child, depth + 1) end
-                    end
-                end
-            end
-        end
-        visit(root, 0)
-        return found, hasRemote
-    end
-
-    local tools = {}
-    local function addTools(container)
-        if not container then return end
-        for _, child in ipairs(container:GetChildren()) do
-            if child:IsA("Tool") then
-                tools[#tools + 1] = child
-            end
-        end
-    end
-    local char = LocalPlayer.Character
-    addTools(char)
-    addTools(LocalPlayer:FindFirstChildOfClass("Backpack"))
-    add("Tools: " .. #tools .. " (equipped first)")
-    for i = 1, math.min(#tools, 4) do
-        local tool = tools[i]
-        add("TOOL " .. instancePath(tool) .. (tool.Parent == char and "  [equipped]" or ""))
-        for _, d in ipairs(tool:GetDescendants()) do
-            if remoteClass[d.ClassName] then
-                add("  " .. d.ClassName .. " " .. instancePath(d))
-            end
-        end
-    end
-
-    local storage = game:GetService("ReplicatedStorage")
-    local remotes, modules = {}, {}
-    for _, d in ipairs(storage:GetDescendants()) do
-        if remoteClass[d.ClassName] then
-            remotes[#remotes + 1] = d.ClassName .. " " .. instancePath(d)
-        elseif d.ClassName == "ModuleScript" then
-            local lower = d.Name:lower()
-            for _, word in ipairs(gunWord) do
-                if lower:find(word, 1, true) then
-                    modules[#modules + 1] = d
-                    candidate(d, "ReplicatedStorage")
-                    break
-                end
-            end
-        end
-    end
-    add("Likely remotes:")
-    for _, remote in ipairs(remotes) do
-        local lower = remote:lower()
-        if lower:find(".fire", 1, true) or lower:find(".hit", 1, true)
-            or lower:find(".shoot", 1, true) or lower:find("headshot", 1, true)
-            or lower:find("damage", 1, true) then
-            add("  " .. remote)
-        end
-    end
-    add("Scripts considered: " .. #candidates .. "; gun-looking modules: " .. #modules)
-    add("Executor: closure=" .. tostring(closure ~= nil) .. " constants=" .. tostring(getconstantsFn ~= nil)
-        .. " protos=" .. tostring(getprotosFn ~= nil))
-    if not closure or not getconstantsFn then
-        add("This executor cannot read script constants, so only names are listed.")
-        for i = 1, math.min(#candidates, 40) do
-            add("  " .. candidates[i].path)
-        end
-    else
-        table.sort(candidates, function(a, b)
-            if a.rank ~= b.rank then return a.rank < b.rank end
-            return a.path < b.path
-        end)
-        local started = os.clock()
-        local checked, matched, unreadable, stopped = 0, 0, 0, nil
-        for i, entry in ipairs(candidates) do
-            if checked >= 330 then stopped = "330 scripts"; break end
-            if matched >= 30 then stopped = "30 matches"; break end
-            if os.clock() - started > 40 then stopped = "40 seconds"; break end
-            checked = checked + 1
-            if progress then
-                progress(string.format("Scanning %d/%d  %s", i, #candidates, entry.script.Name))
-            end
-            local strings, hasRemote = constants(entry.script)
-            if strings == nil then
-                unreadable = unreadable + 1
-                if entry.rank == 0 then
-                    add("SCRIPT [" .. entry.source .. "] " .. entry.path .. "  (could not read)")
-                end
-            elseif hasRemote or entry.rank == 0 then
-                matched = matched + 1
-                add("SCRIPT [" .. entry.source .. "] " .. entry.path .. (hasRemote and "  (calls a remote)" or ""))
-                add("  " .. (#strings > 0 and table.concat(strings, " | ") or "(no matching strings)"))
-            end
-            task.wait(0.03)
-        end
-        add(string.format("Checked %d of %d scripts; listed %d; unreadable %d.", checked, #candidates, matched, unreadable))
-        if stopped then add("Stopped early at " .. stopped .. ".") end
-    end
-    return table.concat(out, "\n")
-end
-
-bindPress(ScanBtn, function()
-    LogText.Text = "Scanning..."
-    LogPanel.Visible = true
-    task.spawn(function()
-        local ok, text = pcall(scanGame, function(message)
-            LogText.Text = message
-        end)
-        if not ok then
-            text = "Scan failed: " .. tostring(text)
-        end
-        LogText.Text = text
-        ScanBtn.Text = postText(text) and "  SENT" or "  LOCAL"
-        task.delay(1.2, function()
-            ScanBtn.Text = "  SCAN"
-        end)
+    task.delay(1.2, function()
+        ReportBtn.Text = "  REPORT"
     end)
 end)
-
-bindPress(CaptureBtn, function()
-    if capture.enabled then
-        capture.enabled = false
-        resetCaptureEvents()
-        refreshUi()
-        return
-    end
-    if state.game == "urban" and installSniffHook then
-        local ok, why = installSniffHook()
-        if not ok then
-            LogText.Text = "CAPTURE needs hookfunction, and this executor has none: " .. tostring(why)
-                .. "\nSCAN still works and installs no hook."
-            LogPanel.Visible = true
-            CaptureBtn.Text = "  NO HOOK"
-            return
-        end
-    end
-    capture.enabled = true
-    resetCaptureEvents()
-    refreshUi()
-end)
-bindPress(PingBtn, function()
-    if not capture.enabled then
-        LogText.Text = "CAPTURE is OFF. Enable it before the next test shot."
-    else
-        LogText.Text = pingCapture()
-        PingBtn.Text = capture.lastSent and "  SENT" or "  LOCAL"
-        pcall(function()
-            task.delay(1.2, function()
-                PingBtn.Text = "  PING"
-            end)
-        end)
-    end
-    LogScroll.CanvasPosition = Vector2.zero
-    LogPanel.Visible = true
-end)
-bindPress(LogBtn, function() LogPanel.Visible = not LogPanel.Visible end)
 local CopyBtn
 CopyBtn = logAction("COPY", 6, 44, function()
     local ok = type(setclipboard) == "function" and pcall(setclipboard, LogText.Text)
     CopyBtn.Text = ok and "COPIED" or "SELECT"
     if not ok then LogText:CaptureFocus() end
 end)
-logAction("CLEAR", 56, 44, function()
-    resetCaptureEvents()
-    table.clear(capture.pings)
-    capture.number = 0
-    LogText.Text = "Cleared. Shoot once, wait for the projectile to stop, then PING within 15 seconds of the shot."
-end)
-logAction("CLOSE", 106, 44, function() LogPanel.Visible = false end)
+logAction("CLOSE", 56, 44, function() LogPanel.Visible = false end)
 
 bindPress(ToggleRow, function()
     if state.game == "urban" then
@@ -1297,7 +1051,7 @@ track(RunService.RenderStepped:Connect(function()
         clearTarget()
         if not renderWarned then
             renderWarned = true
-            warn("[Silent] render error: " .. tostring(err))
+            state.lastError = "render: " .. tostring(err)
         end
     end
 end))
@@ -1430,19 +1184,21 @@ end
 local hooked, why = true, nil
 if state.game == "gungrounds" then
     hooked, why = installHook()
+else
+    hooked, why = installSniffHook()
 end
 if not hooked then
     MainBtn.Text = "NO"
-    warn("[Silent] " .. tostring(why))
+    state.lastError = "hook: " .. tostring(why)
 else
-    print("[Silent v" .. VERSION .. "] " .. (GAME_LABEL[state.game] or state.game)
-        .. ". Nothing is hooked until you use CAPTURE (Urban) or pick Gungrounds. SCAN never hooks.")
-    pcall(function()
-        task.defer(function()
-            postLog("ready v" .. VERSION .. " game=" .. tostring(state.game) .. " capture=" .. tostring(capture.enabled))
-        end)
-    end)
+    capture.enabled = true
 end
+pcall(function()
+    task.defer(function()
+        postLog("ready v" .. VERSION .. " game=" .. tostring(state.game) .. " hooked=" .. tostring(hooked)
+            .. (hooked and "" or " why=" .. tostring(why)))
+    end)
+end)
 
 local function unload()
     if not state.running then
