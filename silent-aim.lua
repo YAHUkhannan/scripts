@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.0"
+local VERSION = "2.1"
 
 local genv = _G
 pcall(function()
@@ -262,6 +262,10 @@ local function pingCapture()
     local labels = type(GAME_LABEL) == "table" and GAME_LABEL or nil
     local mode = (labels and labels[state.game]) or tostring(state.game or "gungrounds")
     local lines = { "===== PING " .. capture.number .. "  " .. mode .. " =====" }
+    if state.game == "urban" then
+        lines[#lines + 1] = "aim=" .. tostring(state.urbanAim) .. " target=" .. tostring(state.part ~= nil)
+            .. " covered=" .. tostring(state.covered) .. " by=" .. tostring(state.coverBy)
+    end
     local ranked = {}
     for i = 1, #capture.order do
         local group = capture.groups[capture.order[i]]
@@ -1027,9 +1031,29 @@ local function blocksHead(eye, headPart, myChar)
     if delta.Magnitude < 0.05 then
         return false
     end
-    coverParams.FilterDescendantsInstances = { myChar }
-    local hit = workspace:Raycast(eye, delta, coverParams)
-    return hit ~= nil and hit.Instance ~= headPart
+    local filter = { myChar }
+    coverParams.FilterDescendantsInstances = filter
+    local model = headPart.Parent
+    for _ = 1, 6 do
+        local hit = workspace:Raycast(eye, delta, coverParams)
+        if not hit then
+            state.coverBy = nil
+            return false
+        end
+        local inst = hit.Instance
+        if inst == headPart or (state.game == "urban" and model and inst:IsDescendantOf(model)) then
+            state.coverBy = nil
+            return false
+        end
+        if state.game ~= "urban" or inst.CanCollide or inst.Transparency < 0.9 then
+            state.coverBy = inst:GetFullName()
+            return true
+        end
+        filter[#filter + 1] = inst
+        coverParams.FilterDescendantsInstances = filter
+    end
+    state.coverBy = "too many see-through parts"
+    return true
 end
 
 local function fovRadius(cam)
