@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.9"
+local VERSION = "2.0"
 
 local genv = _G
 pcall(function()
@@ -43,6 +43,7 @@ local state = {
     running = true,
     enabled = true,
     game = detectGame(),
+    urbanAim = false,
     fov = 30,
     aim = nil,
     head = nil,
@@ -501,7 +502,8 @@ local function refreshUi()
     if state.game == "gungrounds" then
         ToggleRow.Text = "  SILENT v" .. VERSION .. (on and "  ON" or "  OFF")
     else
-        ToggleRow.Text = "  SNIFF ONLY v" .. VERSION
+        on = state.urbanAim
+        ToggleRow.Text = "  AIM v" .. VERSION .. (on and "  ON" or "  OFF")
     end
     ToggleRow.BackgroundColor3 = on and WHITE or BLACK
     ToggleRow.TextColor3 = on and BLACK or WHITE
@@ -872,8 +874,21 @@ end)
 logAction("CLOSE", 106, 44, function() LogPanel.Visible = false end)
 
 bindPress(ToggleRow, function()
-    state.enabled = not state.enabled
-    if not state.enabled then clearTarget() end
+    if state.game == "urban" then
+        if not state.urbanAim and installSniffHook then
+            local ok, why = installSniffHook()
+            if not ok then
+                LogText.Text = "AIM needs hookfunction, and this executor has none: " .. tostring(why)
+                LogPanel.Visible = true
+                return
+            end
+        end
+        state.urbanAim = not state.urbanAim
+        if not state.urbanAim then clearTarget() end
+    else
+        state.enabled = not state.enabled
+        if not state.enabled then clearTarget() end
+    end
     refreshUi()
 end)
 
@@ -1189,7 +1204,9 @@ track(RunService.RenderStepped:Connect(function()
         if not circle or not cam then
             return
         end
-        if not state.enabled or (state.game or "gungrounds") ~= "gungrounds" then
+        local mode = state.game or "gungrounds"
+        local aimOn = (mode == "gungrounds" and state.enabled) or (mode == "urban" and state.urbanAim)
+        if not aimOn then
             circle.Visible = false
             state.aim = nil
             return
@@ -1273,6 +1290,30 @@ end
 
 ensureGameHook = installHook
 
+-- Remotes.Fire carries the aim twice: a direction from the gun to a point (2, 5)
+-- and from the camera to a point (12, 13). Point all four at the head.
+local function urbanFireArgs(...)
+    local argc = select("#", ...)
+    if argc < 13 or not state.part or typeof(state.head) ~= "Vector3" then
+        return nil
+    end
+    local muzzle, camPos = select(1, ...), select(11, ...)
+    if typeof(muzzle) ~= "Vector3" or typeof(camPos) ~= "Vector3" then
+        return nil
+    end
+    local head = state.head
+    local toHead, fromCamera = head - muzzle, head - camPos
+    if toHead.Magnitude < 0.5 or fromCamera.Magnitude < 0.5 then
+        return nil
+    end
+    local args = { ... }
+    args[2] = toHead.Unit
+    args[5] = head
+    args[12] = fromCamera.Unit
+    args[13] = head
+    return args, argc
+end
+
 -- Urban Reload: hook only the two remote methods, never every game call.
 -- A hook on all namecalls sits in the path of WaitForChild and other yielding
 -- calls, which is the likely reason equipping the gun broke.
@@ -1287,9 +1328,20 @@ installSniffHook = function()
         local function wrap(target)
             local old
             old = hookfunction(target, function(self, ...)
-                if capture.enabled and state.running and state.game == "urban"
-                    and not (isOurCall and isOurCall()) and typeof(self) == "Instance" then
-                    pcall(recordRemote, "call", self, ...)
+                if state.running and state.game == "urban" and typeof(self) == "Instance"
+                    and not (isOurCall and isOurCall()) then
+                    if capture.enabled then
+                        pcall(recordRemote, "call", self, ...)
+                    end
+                    if state.urbanAim and self.Name == "Fire" then
+                        local okArgs, args, argc = pcall(urbanFireArgs, ...)
+                        if okArgs and args then
+                            if capture.enabled then
+                                pcall(recordRemote, "call sent", self, table.unpack(args, 1, argc))
+                            end
+                            return old(self, table.unpack(args, 1, argc))
+                        end
+                    end
                 end
                 return old(self, ...)
             end)
@@ -1340,6 +1392,7 @@ local function unload()
     end
     state.running = false
     state.enabled = false
+    state.urbanAim = false
     capture.enabled = false
     resetCaptureEvents()
     table.clear(capture.pings)

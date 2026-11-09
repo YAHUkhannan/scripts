@@ -42,6 +42,10 @@ local Vector = {}
 local function vector(x, y, z) return setmetatable({X=x, Y=y, Z=z or 0}, Vector) end
 Vector.__index = function(v, k)
     if k == "Magnitude" then return math.sqrt(v.X*v.X + v.Y*v.Y + v.Z*v.Z) end
+    if k == "Unit" then
+        local m = math.sqrt(v.X*v.X + v.Y*v.Y + v.Z*v.Z)
+        return vector(v.X/m, v.Y/m, v.Z/m)
+    end
 end
 Vector.__add = function(a,b) return vector(a.X+b.X,a.Y+b.Y,a.Z+b.Z) end
 Vector.__sub = function(a,b) return vector(a.X-b.X,a.Y-b.Y,a.Z-b.Z) end
@@ -404,6 +408,45 @@ check("urban sniffer hooks only remote methods, forwards yields, and is idle unt
     assert(forwarded==3 and recorded==1, "gungrounds mode must not record twice")
     e.hookfunction=nil; e.state.sniffHooked=false
     local bad, why=install(); assert(bad==false and why=="no hookfunction")
+end)
+
+check("urban fire rewrite aims all four aim arguments at the head and ignores everything else", function()
+    local fire, invoke, replacements, sent = function() end, function() end, {}, nil
+    local function kind(value)
+        if getmetatable(value)==Vector then return "Vector3" end
+        return type(value)=="table" and value.kind or type(value)
+    end
+    local e = env({state={running=true,game="urban",urbanAim=true,part={kind="Instance"},head=vector(0,0,100)},
+        capture={enabled=false}, typeof=kind, recordRemote=function() end,
+        Instance={new=function() return {FireServer=fire, InvokeServer=invoke, Destroy=function() end} end},
+        hookfunction=function(target, replacement)
+            replacements[target]=replacement
+            return function(_, ...) sent=table.pack(...); return "ok" end
+        end})
+    e.urbanFireArgs=fn(silent,"local function urbanFireArgs(","-- Urban Reload: hook only","urbanFireArgs",e)
+    local install=compile(section(silent,"installSniffHook = function()","local hooked, why = true").."\nreturn installSniffHook",e)
+    assert(install())
+    local function call(name, ...)
+        sent=nil
+        local result=replacements[fire]({kind="Instance",Name=name}, ...)
+        assert(result=="ok" and sent)
+        return sent
+    end
+    local function shot(name)
+        return call(name, vector(0,0,0), vector(1,0,0), nil, nil, vector(5,5,5), nil, {}, nil, nil, 99,
+            vector(0,10,0), vector(0,0,1), vector(5,5,5))
+    end
+    local out=shot("Fire")
+    assert(out.n==13 and out[10]==99 and out[3]==nil and out[11].Y==10 and out[1].Z==0)
+    assert(out[2].Z==1 and out[2].X==0 and out[5].Z==100 and out[13].Z==100)
+    assert(out[12].Z>0.99 and out[12].Y<0 and out[12].X==0, "camera direction must point at the head")
+    assert(shot("Hit")[2].X==1, "other remotes must be left alone")
+    e.state.urbanAim=false
+    assert(shot("Fire")[2].X==1, "AIM off must forward unchanged")
+    e.state.urbanAim=true; e.state.part=nil
+    assert(shot("Fire")[2].X==1, "no target must forward unchanged")
+    e.state.part={kind="Instance"}
+    assert(call("Fire", vector(0,0,0), vector(1,0,0)).n==2, "short calls must forward unchanged")
 end)
 
 check("corner boxes stay thin, fade at distance, and yield to tiny skeletons", function()
