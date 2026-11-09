@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.4"
+local VERSION = "1.6"
 
 local genv = _G
 pcall(function()
@@ -163,10 +163,10 @@ local function captureRemote(stage, remote, ...)
     local path = instancePath(remote)
     local key = stage .. "\0" .. path
     local argc, lines = select("#", ...), {}
-    for i = 1, math.min(argc, 12) do
+    for i = 1, math.min(argc, 24) do
         lines[#lines + 1] = "  [" .. i .. "] " .. preview(select(i, ...), 0)
     end
-    if argc > 12 then lines[#lines + 1] = "  ... arguments truncated" end
+    if argc > 24 then lines[#lines + 1] = "  ... arguments truncated" end
     local sample = "argc=" .. argc .. "\n" .. table.concat(lines, "\n")
     local now = os.clock()
     local group = capture.groups[key]
