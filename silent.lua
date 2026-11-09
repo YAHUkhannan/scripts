@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.7"
+local VERSION = "1.8"
 
 local genv = _G
 pcall(function()
@@ -611,7 +611,7 @@ bindPress(GameRow, function()
 end)
 
 -- Reads the gun's own scripts. No hook is installed, so the game is untouched.
-local function scanGame()
+local function scanGame(progress)
     local mode = GAME_LABEL[state.game] or tostring(state.game)
     local out = { "===== DEEP SCAN  " .. mode .. " =====" }
     local function add(text) out[#out + 1] = text end
@@ -620,10 +620,25 @@ local function scanGame()
     local gunWord = { "gun", "weapon", "shoot", "fire", "projectile", "bullet", "ammo", "reload", "combat", "tool" }
 
     local candidates, seen = {}, setmetatable({}, { __mode = "k" })
+    local defaultScripts = { "PlayerModule", "RbxCharacterSounds", "BubbleChat", "ChatScript",
+        "PlayerScriptsLoader", "ControlModule", "CameraModule", "AnimateScript" }
+    local sourceRank = { ReplicatedStorage = 1, PlayerScripts = 2, Character = 3, Backpack = 3, loaded = 5 }
     local function candidate(script, source)
         if not script or seen[script] or not scriptClass[script.ClassName] then return end
         seen[script] = true
-        candidates[#candidates + 1] = { script = script, source = source }
+        local path = instancePath(script)
+        for _, name in ipairs(defaultScripts) do
+            if path:find(name, 1, true) then return end
+        end
+        local rank = sourceRank[source] or 4
+        local lowerName = script.Name:lower()
+        for _, word in ipairs(gunWord) do
+            if lowerName:find(word, 1, true) then
+                rank = 0
+                break
+            end
+        end
+        candidates[#candidates + 1] = { script = script, source = source, rank = rank, path = path }
     end
     local function descendants(container, source)
         if not container then return end
@@ -648,59 +663,53 @@ local function scanGame()
         or (type(getscriptfunction) == "function" and getscriptfunction or nil)
     local getconstantsFn = type(getconstants) == "function" and getconstants
         or (type(debug) == "table" and type(debug.getconstants) == "function" and debug.getconstants or nil)
+    local getprotosFn = type(getprotos) == "function" and getprotos
+        or (type(debug) == "table" and type(debug.getprotos) == "function" and debug.getprotos or nil)
+    local interesting = { "fire", "hit", "shoot", "reload", "ray", "remote", "damage", "bullet",
+        "gun", "weapon", "spread", "recoil", "head", "muzzle", "ammo" }
+
+    -- Reads string constants only. Nothing is decompiled.
+    -- Returns the relevant strings and whether a remote call name was present.
     local function constants(script)
-        if not closure or not getconstantsFn then return {} end
-        local okFn, fn = pcall(closure, script)
-        if not okFn or type(fn) ~= "function" then return {} end
-        local okConstants, values = pcall(getconstantsFn, fn)
-        if not okConstants or type(values) ~= "table" then return {} end
-        local found, used = {}, {}
-        for _, value in ipairs(values) do
-            if type(value) == "string" then
-                local lower = value:lower()
-                if lower:find("fire", 1, true) or lower:find("hit", 1, true)
-                    or lower:find("shoot", 1, true) or lower:find("reload", 1, true)
-                    or lower:find("ray", 1, true) then
-                    local clean = value:gsub("[%c]", " "):sub(1, 100)
-                    if not used[clean] then
-                        used[clean] = true
-                        found[#found + 1] = clean
-                        if #found >= 16 then break end
+        if not closure or not getconstantsFn then return nil end
+        local okFn, root = pcall(closure, script)
+        if not okFn or type(root) ~= "function" then return nil end
+        local found, used, hasRemote, protos = {}, {}, false, 0
+        local function visit(fn, depth)
+            local okC, values = pcall(getconstantsFn, fn)
+            if okC and type(values) == "table" then
+                for _, value in ipairs(values) do
+                    if type(value) == "string" and #value <= 60 then
+                        if value == "FireServer" or value == "InvokeServer" then
+                            hasRemote = true
+                        end
+                        local lower = value:lower()
+                        for _, word in ipairs(interesting) do
+                            if lower:find(word, 1, true) then
+                                local clean = value:gsub("%c", " ")
+                                if not used[clean] and #found < 40 then
+                                    used[clean] = true
+                                    found[#found + 1] = clean
+                                end
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            if getprotosFn and depth < 3 and protos < 60 then
+                local okP, children = pcall(getprotosFn, fn)
+                if okP and type(children) == "table" then
+                    for _, child in ipairs(children) do
+                        protos = protos + 1
+                        if protos > 60 then break end
+                        if type(child) == "function" then visit(child, depth + 1) end
                     end
                 end
             end
         end
-        return found
-    end
-
-    local function inspect(entry)
-        if type(decompile) ~= "function" then return nil end
-        local ok, src = pcall(decompile, entry.script)
-        if not ok or type(src) ~= "string" then return nil end
-        local lower = src:lower()
-        if not (lower:find("fireserver", 1, true) or lower:find("invokeserver", 1, true)
-            or lower:find("remotes.fire", 1, true) or lower:find("remotes.hit", 1, true)) then
-            return false
-        end
-        local lines = {}
-        for line in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
-        add("SCRIPT [" .. entry.source .. "] " .. instancePath(entry.script))
-        local calls = 0
-        for i, line in ipairs(lines) do
-            local low = line:lower()
-            if low:find("fireserver", 1, true) or low:find("invokeserver", 1, true)
-                or low:find("remotes.fire", 1, true) or low:find("remotes.hit", 1, true) then
-                calls = calls + 1
-                local first, last = math.max(1, i - 2), math.min(#lines, i + 2)
-                for n = first, last do
-                    add(string.format("  %d%s %s", n, n == i and ">" or ":", lines[n]:gsub("^%s+", ""):sub(1, 180)))
-                end
-                if calls >= 10 then break end
-            end
-        end
-        local strings = constants(entry.script)
-        if #strings > 0 then add("  constants: " .. table.concat(strings, " | ")) end
-        return true
+        visit(root, 0)
+        return found, hasRemote
     end
 
     local tools = {}
@@ -752,17 +761,38 @@ local function scanGame()
         end
     end
     add("Scripts considered: " .. #candidates .. "; gun-looking modules: " .. #modules)
-    if type(decompile) ~= "function" then
-        add("No decompile function on this executor.")
-    else
-        local checked, matched = 0, 0
-        for _, entry in ipairs(candidates) do
-            if checked >= 500 or matched >= 24 then break end
-            checked = checked + 1
-            if inspect(entry) then matched = matched + 1 end
-            if checked % 20 == 0 then task.wait() end
+    add("Executor: closure=" .. tostring(closure ~= nil) .. " constants=" .. tostring(getconstantsFn ~= nil)
+        .. " protos=" .. tostring(getprotosFn ~= nil))
+    if not closure or not getconstantsFn then
+        add("This executor cannot read script constants, so only names are listed.")
+        for i = 1, math.min(#candidates, 40) do
+            add("  " .. candidates[i].path)
         end
-        add("Deep scan checked " .. checked .. " scripts; matched " .. matched .. ".")
+    else
+        table.sort(candidates, function(a, b)
+            if a.rank ~= b.rank then return a.rank < b.rank end
+            return a.path < b.path
+        end)
+        local started = os.clock()
+        local checked, matched, stopped = 0, 0, nil
+        for i, entry in ipairs(candidates) do
+            if checked >= 80 then stopped = "80 scripts"; break end
+            if matched >= 12 then stopped = "12 matches"; break end
+            if os.clock() - started > 15 then stopped = "15 seconds"; break end
+            checked = checked + 1
+            if progress then
+                progress(string.format("Scanning %d/%d  %s", i, #candidates, entry.script.Name))
+            end
+            local strings, hasRemote = constants(entry.script)
+            if strings and (hasRemote or entry.rank == 0) and #strings > 0 then
+                matched = matched + 1
+                add("SCRIPT [" .. entry.source .. "] " .. entry.path .. (hasRemote and "  (calls a remote)" or ""))
+                add("  " .. table.concat(strings, " | "))
+            end
+            task.wait(0.05)
+        end
+        add(string.format("Checked %d of %d scripts; listed %d.", checked, #candidates, matched))
+        if stopped then add("Stopped early at " .. stopped .. ".") end
     end
     return table.concat(out, "\n")
 end
@@ -771,7 +801,9 @@ bindPress(ScanBtn, function()
     LogText.Text = "Scanning..."
     LogPanel.Visible = true
     task.spawn(function()
-        local ok, text = pcall(scanGame)
+        local ok, text = pcall(scanGame, function(message)
+            LogText.Text = message
+        end)
         if not ok then
             text = "Scan failed: " .. tostring(text)
         end
