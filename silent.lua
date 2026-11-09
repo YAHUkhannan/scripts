@@ -8,7 +8,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.4"
+local VERSION = "2.5"
 
 local genv = _G
 pcall(function()
@@ -257,6 +257,24 @@ local function postText(text)
     return first
 end
 
+local function describeTarget(model)
+    local ok, text = pcall(function()
+        if typeof(model) ~= "Instance" then return "none" end
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        local info = { model.Name }
+        if hum then
+            info[#info + 1] = string.format("health=%.0f/%.0f", hum.Health, hum.MaxHealth)
+        end
+        for _, key in ipairs({ "SpawnShield", "Armor", "Downed" }) do
+            local value = model:GetAttribute(key)
+            if value ~= nil then info[#info + 1] = key .. "=" .. tostring(value) end
+        end
+        if model:FindFirstChildOfClass("ForceField") then info[#info + 1] = "ForceField" end
+        return table.concat(info, " ")
+    end)
+    return ok and text or "unreadable"
+end
+
 local function pingCapture()
     capture.number = capture.number + 1
     local now = os.clock()
@@ -266,33 +284,8 @@ local function pingCapture()
     if state.game == "urban" then
         lines[#lines + 1] = "aim=" .. tostring(state.urbanAim) .. " target=" .. tostring(state.part ~= nil)
             .. " covered=" .. tostring(state.covered) .. " by=" .. tostring(state.coverBy)
-        pcall(function()
-            local model = state.part and state.part.Parent
-            if not model then return end
-            local hum = model:FindFirstChildOfClass("Humanoid")
-            local info = { "target=" .. model.Name }
-            if hum then
-                info[#info + 1] = string.format("health=%.0f/%.0f", hum.Health, hum.MaxHealth)
-            end
-            local guards = {}
-            for _, child in ipairs(model:GetChildren()) do
-                if child:IsA("ForceField") or child.Name:lower():find("shield")
-                    or child.Name:lower():find("protect") or child.Name:lower():find("spawn") then
-                    guards[#guards + 1] = child.Name
-                end
-            end
-            info[#info + 1] = "guards=" .. (#guards > 0 and table.concat(guards, ",") or "none")
-            local player = Players:GetPlayerFromCharacter(model)
-            if player then
-                info[#info + 1] = "team=" .. tostring(player.Team and player.Team.Name)
-                local attrs = {}
-                for k, v in pairs(model:GetAttributes()) do attrs[#attrs + 1] = k .. "=" .. tostring(v) end
-                for k, v in pairs(player:GetAttributes()) do attrs[#attrs + 1] = "p." .. k .. "=" .. tostring(v) end
-                table.sort(attrs)
-                if #attrs > 0 then info[#info + 1] = "attrs{" .. table.concat(attrs, ",", 1, math.min(#attrs, 12)) .. "}" end
-            end
-            lines[#lines + 1] = table.concat(info, " ")
-        end)
+        lines[#lines + 1] = "in circle: " .. describeTarget(state.part and state.part.Parent)
+        lines[#lines + 1] = "last shot at: " .. describeTarget(state.lastShotModel)
     end
     local ranked = {}
     for i = 1, #capture.order do
@@ -853,7 +846,9 @@ local function bestTarget(cam, radius)
             local char = p.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             local part = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
-            if hum and part and hum.Health > 0 then
+            local shielded = false
+            pcall(function() shielded = char:GetAttribute("SpawnShield") == true end)
+            if hum and part and hum.Health > 0 and not shielded then
                 local sp, onScreen = cam:WorldToViewportPoint(part.Position)
                 if onScreen and sp.Z > 0 then
                     local dist = (Vector2.new(sp.X, sp.Y) - center).Magnitude
@@ -1148,6 +1143,7 @@ installSniffHook = function()
                     if state.urbanAim and self.Name == "Fire" then
                         local okArgs, args, argc = pcall(urbanFireArgs, ...)
                         if okArgs and args then
+                            state.lastShotModel = args[3]
                             if capture.enabled then
                                 pcall(recordRemote, "call sent", self, table.unpack(args, 1, argc))
                             end
