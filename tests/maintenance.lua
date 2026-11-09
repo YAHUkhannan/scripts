@@ -416,7 +416,7 @@ check("urban fire rewrite aims all four aim arguments at the head and ignores ev
         if getmetatable(value)==Vector then return "Vector3" end
         return type(value)=="table" and value.kind or type(value)
     end
-    local e = env({state={running=true,game="urban",urbanAim=true,part={kind="Instance"},head=vector(0,0,100)},
+    local e = env({state={running=true,game="urban",urbanAim=true,part={kind="Instance",Name="Head",Parent={kind="Instance",Name="Dummy"}},head=vector(0,0,100)},
         capture={enabled=false}, typeof=kind, recordRemote=function() end,
         Instance={new=function() return {FireServer=fire, InvokeServer=invoke, Destroy=function() end} end},
         hookfunction=function(target, replacement)
@@ -437,7 +437,8 @@ check("urban fire rewrite aims all four aim arguments at the head and ignores ev
             vector(0,10,0), vector(0,0,1), vector(5,5,5))
     end
     local out=shot("Fire")
-    assert(out.n==13 and out[10]==99 and out[3]==nil and out[11].Y==10 and out[1].Z==0)
+    assert(out.n==13 and out[10]==99 and out[11].Y==10 and out[1].Z==0)
+    assert(out[3].Name=="Dummy" and out[4]=="Head", "hit character and part must be filled in")
     assert(out[2].Z==1 and out[2].X==0 and out[5].Z==100 and out[13].Z==100)
     assert(out[12].Z>0.99 and out[12].Y<0 and out[12].X==0, "camera direction must point at the head")
     assert(shot("Hit")[2].X==1, "other remotes must be left alone")
@@ -445,7 +446,7 @@ check("urban fire rewrite aims all four aim arguments at the head and ignores ev
     assert(shot("Fire")[2].X==1, "AIM off must forward unchanged")
     e.state.urbanAim=true; e.state.part=nil
     assert(shot("Fire")[2].X==1, "no target must forward unchanged")
-    e.state.part={kind="Instance"}
+    e.state.part={kind="Instance",Name="Head",Parent={kind="Instance",Name="Dummy"}}
     assert(call("Fire", vector(0,0,0), vector(1,0,0)).n==2, "short calls must forward unchanged")
 end)
 

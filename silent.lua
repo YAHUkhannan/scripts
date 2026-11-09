@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.2"
+local VERSION = "2.3"
 
 local genv = _G
 pcall(function()
@@ -1342,7 +1342,8 @@ end
 ensureGameHook = installHook
 
 -- Remotes.Fire carries the aim twice: a direction from the gun to a point (2, 5)
--- and from the camera to a point (12, 13). Point all four at the head.
+-- and from the camera to a point (12, 13). A real hit also fills in the character
+-- (3) and the part name (4). Point all of them at the head.
 local function urbanFireArgs(...)
     local argc = select("#", ...)
     if argc < 13 or not state.part or typeof(state.head) ~= "Vector3" then
@@ -1357,8 +1358,14 @@ local function urbanFireArgs(...)
     if toHead.Magnitude < 0.5 or fromCamera.Magnitude < 0.5 then
         return nil
     end
+    local model = state.part.Parent
+    if typeof(model) ~= "Instance" then
+        return nil
+    end
     local args = { ... }
     args[2] = toHead.Unit
+    args[3] = model
+    args[4] = state.part.Name
     args[5] = head
     args[12] = fromCamera.Unit
     args[13] = head
