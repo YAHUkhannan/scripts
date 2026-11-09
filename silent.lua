@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.1"
+local VERSION = "2.2"
 
 local genv = _G
 pcall(function()
@@ -265,6 +265,33 @@ local function pingCapture()
     if state.game == "urban" then
         lines[#lines + 1] = "aim=" .. tostring(state.urbanAim) .. " target=" .. tostring(state.part ~= nil)
             .. " covered=" .. tostring(state.covered) .. " by=" .. tostring(state.coverBy)
+        pcall(function()
+            local model = state.part and state.part.Parent
+            if not model then return end
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            local info = { "target=" .. model.Name }
+            if hum then
+                info[#info + 1] = string.format("health=%.0f/%.0f", hum.Health, hum.MaxHealth)
+            end
+            local guards = {}
+            for _, child in ipairs(model:GetChildren()) do
+                if child:IsA("ForceField") or child.Name:lower():find("shield")
+                    or child.Name:lower():find("protect") or child.Name:lower():find("spawn") then
+                    guards[#guards + 1] = child.Name
+                end
+            end
+            info[#info + 1] = "guards=" .. (#guards > 0 and table.concat(guards, ",") or "none")
+            local player = Players:GetPlayerFromCharacter(model)
+            if player then
+                info[#info + 1] = "team=" .. tostring(player.Team and player.Team.Name)
+                local attrs = {}
+                for k, v in pairs(model:GetAttributes()) do attrs[#attrs + 1] = k .. "=" .. tostring(v) end
+                for k, v in pairs(player:GetAttributes()) do attrs[#attrs + 1] = "p." .. k .. "=" .. tostring(v) end
+                table.sort(attrs)
+                if #attrs > 0 then info[#info + 1] = "attrs{" .. table.concat(attrs, ",", 1, math.min(#attrs, 12)) .. "}" end
+            end
+            lines[#lines + 1] = table.concat(info, " ")
+        end)
     end
     local ranked = {}
     for i = 1, #capture.order do
