@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "1.6"
+local VERSION = "1.7"
 
 local genv = _G
 pcall(function()
@@ -613,43 +613,94 @@ end)
 -- Reads the gun's own scripts. No hook is installed, so the game is untouched.
 local function scanGame()
     local mode = GAME_LABEL[state.game] or tostring(state.game)
-    local out = { "===== SCAN  " .. mode .. " =====" }
+    local out = { "===== DEEP SCAN  " .. mode .. " =====" }
     local function add(text) out[#out + 1] = text end
     local remoteClass = { RemoteEvent = true, RemoteFunction = true, UnreliableRemoteEvent = true }
     local scriptClass = { LocalScript = true, ModuleScript = true, Script = true }
     local gunWord = { "gun", "weapon", "shoot", "fire", "projectile", "bullet", "ammo", "reload", "combat", "tool" }
 
-    local function grep(script, limit)
-        if type(decompile) ~= "function" then
-            return nil
+    local candidates, seen = {}, setmetatable({}, { __mode = "k" })
+    local function candidate(script, source)
+        if not script or seen[script] or not scriptClass[script.ClassName] then return end
+        seen[script] = true
+        candidates[#candidates + 1] = { script = script, source = source }
+    end
+    local function descendants(container, source)
+        if not container then return end
+        for _, d in ipairs(container:GetDescendants()) do
+            candidate(d, source)
         end
-        local ok, src = pcall(decompile, script)
-        if not ok or type(src) ~= "string" then
-            return nil
+    end
+
+    -- PlayerScripts is where Urban Reload keeps its gun controller. Also scan
+    -- character/backpack scripts and every loaded module the executor exposes.
+    descendants(LocalPlayer:FindFirstChild("PlayerScripts"), "PlayerScripts")
+    descendants(LocalPlayer.Character, "Character")
+    descendants(LocalPlayer:FindFirstChildOfClass("Backpack"), "Backpack")
+    if type(getloadedmodules) == "function" then
+        local ok, loaded = pcall(getloadedmodules)
+        if ok and type(loaded) == "table" then
+            for _, module in ipairs(loaded) do candidate(module, "loaded") end
         end
-        local hits, n = {}, 0
-        for line in (src .. "\n"):gmatch("(.-)\n") do
-            n = n + 1
-            if line:find("FireServer", 1, true) or line:find("InvokeServer", 1, true) then
-                hits[#hits + 1] = string.format("    %d: %s", n, line:gsub("^%s+", ""):sub(1, 140))
-                if #hits >= limit then
-                    break
+    end
+
+    local closure = type(getscriptclosure) == "function" and getscriptclosure
+        or (type(getscriptfunction) == "function" and getscriptfunction or nil)
+    local getconstantsFn = type(getconstants) == "function" and getconstants
+        or (type(debug) == "table" and type(debug.getconstants) == "function" and debug.getconstants or nil)
+    local function constants(script)
+        if not closure or not getconstantsFn then return {} end
+        local okFn, fn = pcall(closure, script)
+        if not okFn or type(fn) ~= "function" then return {} end
+        local okConstants, values = pcall(getconstantsFn, fn)
+        if not okConstants or type(values) ~= "table" then return {} end
+        local found, used = {}, {}
+        for _, value in ipairs(values) do
+            if type(value) == "string" then
+                local lower = value:lower()
+                if lower:find("fire", 1, true) or lower:find("hit", 1, true)
+                    or lower:find("shoot", 1, true) or lower:find("reload", 1, true)
+                    or lower:find("ray", 1, true) then
+                    local clean = value:gsub("[%c]", " "):sub(1, 100)
+                    if not used[clean] then
+                        used[clean] = true
+                        found[#found + 1] = clean
+                        if #found >= 16 then break end
+                    end
                 end
             end
         end
-        return hits
+        return found
     end
 
-    local function describe(script)
-        add("  " .. script.ClassName .. " " .. instancePath(script))
-        local hits = grep(script, 8)
-        if hits == nil then
-            add("    (no decompile on this executor)")
-        elseif #hits == 0 then
-            add("    (no remote calls found)")
-        else
-            for _, h in ipairs(hits) do add(h) end
+    local function inspect(entry)
+        if type(decompile) ~= "function" then return nil end
+        local ok, src = pcall(decompile, entry.script)
+        if not ok or type(src) ~= "string" then return nil end
+        local lower = src:lower()
+        if not (lower:find("fireserver", 1, true) or lower:find("invokeserver", 1, true)
+            or lower:find("remotes.fire", 1, true) or lower:find("remotes.hit", 1, true)) then
+            return false
         end
+        local lines = {}
+        for line in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+        add("SCRIPT [" .. entry.source .. "] " .. instancePath(entry.script))
+        local calls = 0
+        for i, line in ipairs(lines) do
+            local low = line:lower()
+            if low:find("fireserver", 1, true) or low:find("invokeserver", 1, true)
+                or low:find("remotes.fire", 1, true) or low:find("remotes.hit", 1, true) then
+                calls = calls + 1
+                local first, last = math.max(1, i - 2), math.min(#lines, i + 2)
+                for n = first, last do
+                    add(string.format("  %d%s %s", n, n == i and ">" or ":", lines[n]:gsub("^%s+", ""):sub(1, 180)))
+                end
+                if calls >= 10 then break end
+            end
+        end
+        local strings = constants(entry.script)
+        if #strings > 0 then add("  constants: " .. table.concat(strings, " | ")) end
+        return true
     end
 
     local tools = {}
@@ -668,13 +719,9 @@ local function scanGame()
     for i = 1, math.min(#tools, 4) do
         local tool = tools[i]
         add("TOOL " .. instancePath(tool) .. (tool.Parent == char and "  [equipped]" or ""))
-        local seen = 0
         for _, d in ipairs(tool:GetDescendants()) do
             if remoteClass[d.ClassName] then
                 add("  " .. d.ClassName .. " " .. instancePath(d))
-            elseif scriptClass[d.ClassName] and seen < 6 then
-                seen = seen + 1
-                describe(d)
             end
         end
     end
@@ -684,21 +731,39 @@ local function scanGame()
     for _, d in ipairs(storage:GetDescendants()) do
         if remoteClass[d.ClassName] then
             remotes[#remotes + 1] = d.ClassName .. " " .. instancePath(d)
-        elseif d.ClassName == "ModuleScript" and #modules < 6 then
+        elseif d.ClassName == "ModuleScript" then
             local lower = d.Name:lower()
             for _, word in ipairs(gunWord) do
                 if lower:find(word, 1, true) then
                     modules[#modules + 1] = d
+                    candidate(d, "ReplicatedStorage")
                     break
                 end
             end
         end
     end
-    add("ReplicatedStorage remotes: " .. #remotes)
-    for i = 1, math.min(#remotes, 80) do add("  " .. remotes[i]) end
-    if #remotes > 80 then add("  ... " .. (#remotes - 80) .. " more") end
-    add("Gun-looking modules: " .. #modules)
-    for _, m in ipairs(modules) do describe(m) end
+    add("Likely remotes:")
+    for _, remote in ipairs(remotes) do
+        local lower = remote:lower()
+        if lower:find(".fire", 1, true) or lower:find(".hit", 1, true)
+            or lower:find(".shoot", 1, true) or lower:find("headshot", 1, true)
+            or lower:find("damage", 1, true) then
+            add("  " .. remote)
+        end
+    end
+    add("Scripts considered: " .. #candidates .. "; gun-looking modules: " .. #modules)
+    if type(decompile) ~= "function" then
+        add("No decompile function on this executor.")
+    else
+        local checked, matched = 0, 0
+        for _, entry in ipairs(candidates) do
+            if checked >= 500 or matched >= 24 then break end
+            checked = checked + 1
+            if inspect(entry) then matched = matched + 1 end
+            if checked % 20 == 0 then task.wait() end
+        end
+        add("Deep scan checked " .. checked .. " scripts; matched " .. matched .. ".")
+    end
     return table.concat(out, "\n")
 end
 
