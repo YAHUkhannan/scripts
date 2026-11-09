@@ -448,6 +448,10 @@ check("urban fire rewrite aims all four aim arguments at the head and ignores ev
     assert(shot("Fire")[2].X==1, "no target must forward unchanged")
     e.state.part={kind="Instance",Name="Head",Parent={kind="Instance",Name="Dummy"}}
     assert(call("Fire", vector(0,0,0), vector(1,0,0)).n==2, "short calls must forward unchanged")
+    e.state.peekOffset=vector(0,2,0)
+    out=shot("Fire")
+    assert(out[1].Y==2 and out[11].Y==12 and out[2].Y<0 and out[5].Z==100, "peek must move the muzzle and camera together")
+    assert(e.state.lastShotShift==e.state.peekOffset and e.state.lastShotPart=="Head")
 end)
 
 check("corner boxes stay thin, fade at distance, and yield to tiny skeletons", function()

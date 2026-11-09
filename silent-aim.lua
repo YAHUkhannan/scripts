@@ -8,7 +8,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.5"
+local VERSION = "2.6"
 
 local genv = _G
 pcall(function()
@@ -45,6 +45,7 @@ local state = {
     enabled = true,
     game = detectGame(),
     urbanAim = false,
+    peek = false,
     fov = 30,
     aim = nil,
     head = nil,
@@ -82,7 +83,7 @@ local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
 local MENU_W = 168
-local MENU_H = 108
+local MENU_H = 134
 
 local function clearTarget()
     state.aim = nil
@@ -91,6 +92,7 @@ local function clearTarget()
     state.eye = nil
     state.root = nil
     state.covered = false
+    state.peekOffset = nil
     state.vel = Vector3.zero
     if circle then
         pcall(function()
@@ -284,8 +286,11 @@ local function pingCapture()
     if state.game == "urban" then
         lines[#lines + 1] = "aim=" .. tostring(state.urbanAim) .. " target=" .. tostring(state.part ~= nil)
             .. " covered=" .. tostring(state.covered) .. " by=" .. tostring(state.coverBy)
+        lines[#lines + 1] = "peek=" .. tostring(state.peek) .. " aiming at part=" .. tostring(state.part and state.part.Name)
+            .. " shift=" .. tostring(state.peekOffset)
         lines[#lines + 1] = "in circle: " .. describeTarget(state.part and state.part.Parent)
         lines[#lines + 1] = "last shot at: " .. describeTarget(state.lastShotModel)
+            .. " part=" .. tostring(state.lastShotPart) .. " shift=" .. tostring(state.lastShotShift)
     end
     local ranked = {}
     for i = 1, #capture.order do
@@ -476,7 +481,8 @@ end
 
 local MinusBtn = stepButton("-", -40)
 local PlusBtn = stepButton("+", -18)
-local ReportBtn = makeRow(82, "  REPORT")
+local PeekRow = makeRow(82, "  PEEK  OFF")
+local ReportBtn = makeRow(108, "  REPORT")
 
 local LogPanel = Instance.new("Frame", sg)
 LogPanel.Name = "ShotCapture"
@@ -529,6 +535,9 @@ local function refreshUi()
     MainStroke.Transparency = on and 0 or 0.6
     FovLabel.Text = string.format("FOV  %.0f", state.fov)
     GameRow.Text = "  " .. (GAME_LABEL[state.game] or "URBAN RELOAD")
+    PeekRow.Text = "  PEEK " .. (state.peek and "2 STUDS  ON" or " OFF")
+    PeekRow.BackgroundColor3 = state.peek and WHITE or BLACK
+    PeekRow.TextColor3 = state.peek and BLACK or WHITE
 end
 refreshUi()
 
@@ -650,6 +659,11 @@ CopyBtn = logAction("COPY", 6, 44, function()
     if not ok then LogText:CaptureFocus() end
 end)
 logAction("CLOSE", 56, 44, function() LogPanel.Visible = false end)
+
+bindPress(PeekRow, function()
+    state.peek = not state.peek
+    refreshUi()
+end)
 
 bindPress(ToggleRow, function()
     if state.game == "urban" then
@@ -828,6 +842,41 @@ local function blocksHead(eye, headPart, myChar)
     end
     state.coverBy = "too many see-through parts"
     return true
+end
+
+-- Urban Reload's server rejects shots through solid walls, so when the head is
+-- hidden try any other part of the body that can still be seen.
+local BODY_PARTS = { "UpperTorso", "Torso", "LowerTorso", "HumanoidRootPart",
+    "LeftUpperArm", "RightUpperArm", "Left Arm", "Right Arm", "LeftLowerArm", "RightLowerArm",
+    "LeftUpperLeg", "RightUpperLeg", "Left Leg", "Right Leg", "LeftLowerLeg", "RightLowerLeg",
+    "LeftHand", "RightHand", "LeftFoot", "RightFoot" }
+local PEEK_PARTS = { "Head", "UpperTorso", "Torso", "HumanoidRootPart" }
+
+local function visiblePart(eye, model, myChar, names)
+    for _, name in ipairs(names) do
+        local part = model:FindFirstChild(name)
+        if part and part:IsA("BasePart") and not blocksHead(eye, part, myChar) then
+            return part
+        end
+    end
+    return nil
+end
+
+-- PEEK: pretend the gun is up to 2 studs higher or to the side, but only where
+-- the path from our real head to that spot is itself clear.
+local function peekShot(eye, model, myChar, right)
+    local up = Vector3.new(0, 1, 0)
+    local offsets = { up, up * 2, right, -right, right * 2, -right * 2, up + right, up - right }
+    for _, offset in ipairs(offsets) do
+        local origin = eye + offset
+        if not blocksHead(eye, { Position = origin, Parent = model }, myChar) then
+            local part = visiblePart(origin, model, myChar, PEEK_PARTS)
+            if part then
+                return part, offset
+            end
+        end
+    end
+    return nil
 end
 
 local function fovRadius(cam)
@@ -1032,7 +1081,24 @@ track(RunService.RenderStepped:Connect(function()
             local from = state.root or cam.CFrame.Position
             state.aim = leadAt(from, state.head, state.vel, state.speed)
             state.covered = blocksHead(state.eye, part, myChar)
-            circle.Color = state.covered and Color3.fromRGB(255, 196, 40) or Color3.fromRGB(80, 255, 120)
+            local color = state.covered and Color3.fromRGB(255, 196, 40) or Color3.fromRGB(80, 255, 120)
+            if state.covered and mode == "urban" and model then
+                local headCover = state.coverBy
+                local body = visiblePart(state.eye, model, myChar, BODY_PARTS)
+                local shift = nil
+                if not body and state.peek then
+                    body, shift = peekShot(state.eye, model, myChar, cam.CFrame.RightVector)
+                end
+                if body then
+                    state.part = body
+                    state.head = body.Position
+                    state.peekOffset = shift
+                    state.covered = false
+                    color = shift and Color3.fromRGB(200, 80, 255) or Color3.fromRGB(60, 200, 255)
+                end
+                state.coverBy = headCover
+            end
+            circle.Color = color
         else
             state.aim = nil
             state.part = nil
@@ -1102,6 +1168,10 @@ local function urbanFireArgs(...)
     if typeof(muzzle) ~= "Vector3" or typeof(camPos) ~= "Vector3" then
         return nil
     end
+    local shift = state.peekOffset
+    if typeof(shift) == "Vector3" then
+        muzzle, camPos = muzzle + shift, camPos + shift
+    end
     local head = state.head
     local toHead, fromCamera = head - muzzle, head - camPos
     if toHead.Magnitude < 0.5 or fromCamera.Magnitude < 0.5 then
@@ -1112,6 +1182,10 @@ local function urbanFireArgs(...)
         return nil
     end
     local args = { ... }
+    if typeof(shift) == "Vector3" then
+        args[1] = muzzle
+        args[11] = camPos
+    end
     args[2] = toHead.Unit
     args[3] = model
     args[4] = state.part.Name
@@ -1144,6 +1218,8 @@ installSniffHook = function()
                         local okArgs, args, argc = pcall(urbanFireArgs, ...)
                         if okArgs and args then
                             state.lastShotModel = args[3]
+                            state.lastShotPart = args[4]
+                            state.lastShotShift = state.peekOffset
                             if capture.enabled then
                                 pcall(recordRemote, "call sent", self, table.unpack(args, 1, argc))
                             end
