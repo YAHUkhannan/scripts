@@ -8,7 +8,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.8"
+local VERSION = "2.9"
 
 local genv = _G
 pcall(function()
@@ -84,7 +84,7 @@ local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 local BTN = 32
 local MENU_W = 168
-local MENU_H = 134
+local MENU_H = 160
 
 local function clearTarget()
     state.aim = nil
@@ -484,7 +484,8 @@ end
 local MinusBtn = stepButton("-", -40)
 local PlusBtn = stepButton("+", -18)
 local PeekRow = makeRow(82, "  PEEK  OFF")
-local ReportBtn = makeRow(108, "  REPORT")
+local ProbeRow = makeRow(108, "  PROBE")
+local ReportBtn = makeRow(134, "  REPORT")
 
 local LogPanel = Instance.new("Frame", sg)
 LogPanel.Name = "ShotCapture"
@@ -673,6 +674,76 @@ bindPress(PeekRow, function()
     state.peekReach = nextReach
     state.peek = nextReach > 0
     refreshUi()
+end)
+
+-- PROBE: try firing unused hit/damage remotes directly at the target in the circle.
+-- The scan found Remotes.Hit, Weapons.Remotes.Headshot, Weapons.Remotes.Shoot,
+-- and Events.DealDamage. None of them fired during any captured shot. If the server
+-- still listens, one of them could register a hit without needing line of sight.
+bindPress(ProbeRow, function()
+    if state.game ~= "urban" then
+        ProbeRow.Text = "  URBAN ONLY"
+        task.delay(1.2, function() ProbeRow.Text = "  PROBE" end)
+        return
+    end
+    if not state.part then
+        ProbeRow.Text = "  NO TARGET"
+        task.delay(1.2, function() ProbeRow.Text = "  PROBE" end)
+        return
+    end
+    local model = state.part.Parent
+    if typeof(model) ~= "Instance" then
+        ProbeRow.Text = "  NO MODEL"
+        task.delay(1.2, function() ProbeRow.Text = "  PROBE" end)
+        return
+    end
+    local head = state.head or state.part.Position
+    local eye = state.eye or (camera() and camera().CFrame.Position) or head
+    local dir = (head - eye)
+    if dir.Magnitude > 0.01 then dir = dir.Unit else dir = Vector3.new(0, 0, -1) end
+
+    local results = {}
+    local paths = {
+        { "ReplicatedStorage", "Remotes", "Hit" },
+        { "ReplicatedStorage", "Weapons", "Remotes", "Headshot" },
+        { "ReplicatedStorage", "Weapons", "Remotes", "Shoot" },
+        { "ReplicatedStorage", "Events", "DealDamage" },
+    }
+    for _, path in ipairs(paths) do
+        local remote = game
+        local name = path[#path]
+        for _, seg in ipairs(path) do
+            remote = remote:FindFirstChild(seg)
+            if not remote then break end
+        end
+        if remote and (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction")) then
+            -- Build plausible arguments: model, part name, position, direction.
+            -- We don't know the real signature, so try the most common patterns.
+            local attempts = {
+                { model, "Head", head },
+                { model, head, dir },
+                { "Head", model, head },
+                { model },
+            }
+            for j, args in ipairs(attempts) do
+                local ok, err
+                if remote:IsA("RemoteEvent") then
+                    ok, err = pcall(function() remote:FireServer(table.unpack(args)) end)
+                else
+                    ok, err = pcall(function() remote:InvokeServer(table.unpack(args)) end)
+                end
+                results[#results + 1] = string.format("%s attempt%d %s %s",
+                    name, j, ok and "ok" or "err", ok and "" or tostring(err))
+            end
+        else
+            results[#results + 1] = table.concat(path, ".") .. " not found"
+        end
+    end
+    local text = "PROBE target=" .. model.Name .. " part=" .. tostring(state.part.Name)
+        .. "\n" .. table.concat(results, "\n")
+    postText(text)
+    ProbeRow.Text = "  SENT"
+    task.delay(1.2, function() ProbeRow.Text = "  PROBE" end)
 end)
 
 bindPress(ToggleRow, function()
