@@ -8,7 +8,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.6"
+local VERSION = "2.7"
 
 local genv = _G
 pcall(function()
@@ -92,6 +92,7 @@ local function clearTarget()
     state.eye = nil
     state.root = nil
     state.covered = false
+    state.thin = false
     state.peekOffset = nil
     state.vel = Vector3.zero
     if circle then
@@ -285,7 +286,7 @@ local function pingCapture()
     local lines = { "===== REPORT " .. capture.number .. "  " .. mode .. " =====" }
     if state.game == "urban" then
         lines[#lines + 1] = "aim=" .. tostring(state.urbanAim) .. " target=" .. tostring(state.part ~= nil)
-            .. " covered=" .. tostring(state.covered) .. " by=" .. tostring(state.coverBy)
+            .. " covered=" .. tostring(state.covered) .. " thin=" .. tostring(state.thin) .. " by=" .. tostring(state.coverBy)
         lines[#lines + 1] = "peek=" .. tostring(state.peek) .. " aiming at part=" .. tostring(state.part and state.part.Name)
             .. " shift=" .. tostring(state.peekOffset)
         lines[#lines + 1] = "in circle: " .. describeTarget(state.part and state.part.Parent)
@@ -844,6 +845,28 @@ local function blocksHead(eye, headPart, myChar)
     return true
 end
 
+-- Thin cover (fences, railings) let headshots through in testing; solid walls did
+-- not. Measure the blocker: a ray from us finds its front face, a ray back from
+-- the head finds its back face. One part, under ~1.2 studs thick, counts as thin.
+local THIN_LIMIT = 1.2
+local function thinCover(eye, headPart, myChar)
+    if typeof(eye) ~= "Vector3" or not headPart then
+        return false
+    end
+    local model = headPart.Parent
+    local head = headPart.Position
+    coverParams.FilterDescendantsInstances = { myChar, model }
+    local front = workspace:Raycast(eye, head - eye, coverParams)
+    if not front then
+        return true
+    end
+    local back = workspace:Raycast(head, eye - head, coverParams)
+    if not back or back.Instance ~= front.Instance then
+        return false
+    end
+    return (back.Position - front.Position).Magnitude <= THIN_LIMIT
+end
+
 -- Urban Reload's server rejects shots through solid walls, so when the head is
 -- hidden try any other part of the body that can still be seen.
 local BODY_PARTS = { "UpperTorso", "Torso", "LowerTorso", "HumanoidRootPart",
@@ -1081,8 +1104,15 @@ track(RunService.RenderStepped:Connect(function()
             local from = state.root or cam.CFrame.Position
             state.aim = leadAt(from, state.head, state.vel, state.speed)
             state.covered = blocksHead(state.eye, part, myChar)
+            state.thin = false
+            state.peekOffset = nil
             local color = state.covered and Color3.fromRGB(255, 196, 40) or Color3.fromRGB(80, 255, 120)
-            if state.covered and mode == "urban" and model then
+            if state.covered and mode == "urban" and model and thinCover(state.eye, part, myChar) then
+                state.covered = false
+                state.thin = true
+                color = Color3.fromRGB(255, 140, 0)
+            elseif state.covered and mode == "urban" and model then
+                state.thin = false
                 local headCover = state.coverBy
                 local body = visiblePart(state.eye, model, myChar, BODY_PARTS)
                 local shift = nil
