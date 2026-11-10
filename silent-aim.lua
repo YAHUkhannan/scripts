@@ -8,7 +8,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local VERSION = "2.7"
+local VERSION = "2.8"
 
 local genv = _G
 pcall(function()
@@ -46,6 +46,7 @@ local state = {
     game = detectGame(),
     urbanAim = false,
     peek = false,
+    peekReach = 0,
     fov = 30,
     aim = nil,
     head = nil,
@@ -287,7 +288,7 @@ local function pingCapture()
     if state.game == "urban" then
         lines[#lines + 1] = "aim=" .. tostring(state.urbanAim) .. " target=" .. tostring(state.part ~= nil)
             .. " covered=" .. tostring(state.covered) .. " thin=" .. tostring(state.thin) .. " by=" .. tostring(state.coverBy)
-        lines[#lines + 1] = "peek=" .. tostring(state.peek) .. " aiming at part=" .. tostring(state.part and state.part.Name)
+        lines[#lines + 1] = "peek=" .. tostring(state.peekReach) .. " aiming at part=" .. tostring(state.part and state.part.Name)
             .. " shift=" .. tostring(state.peekOffset)
         lines[#lines + 1] = "in circle: " .. describeTarget(state.part and state.part.Parent)
         lines[#lines + 1] = "last shot at: " .. describeTarget(state.lastShotModel)
@@ -536,7 +537,7 @@ local function refreshUi()
     MainStroke.Transparency = on and 0 or 0.6
     FovLabel.Text = string.format("FOV  %.0f", state.fov)
     GameRow.Text = "  " .. (GAME_LABEL[state.game] or "URBAN RELOAD")
-    PeekRow.Text = "  PEEK " .. (state.peek and "2 STUDS  ON" or " OFF")
+    PeekRow.Text = "  PEEK " .. (state.peek and (state.peekReach .. " STUDS") or " OFF")
     PeekRow.BackgroundColor3 = state.peek and WHITE or BLACK
     PeekRow.TextColor3 = state.peek and BLACK or WHITE
 end
@@ -662,7 +663,15 @@ end)
 logAction("CLOSE", 56, 44, function() LogPanel.Visible = false end)
 
 bindPress(PeekRow, function()
-    state.peek = not state.peek
+    -- OFF -> 2 -> 4 -> 8 -> 15 -> OFF. Bigger reaches see over taller walls,
+    -- and are more likely to be noticed by the server.
+    local steps = { 0, 2, 4, 8, 15 }
+    local nextReach = 0
+    for i, v in ipairs(steps) do
+        if v == state.peekReach then nextReach = steps[i % #steps + 1] break end
+    end
+    state.peekReach = nextReach
+    state.peek = nextReach > 0
     refreshUi()
 end)
 
@@ -887,9 +896,13 @@ end
 
 -- PEEK: pretend the gun is up to 2 studs higher or to the side, but only where
 -- the path from our real head to that spot is itself clear.
-local function peekShot(eye, model, myChar, right)
+local function peekShot(eye, model, myChar, right, reach)
     local up = Vector3.new(0, 1, 0)
-    local offsets = { up, up * 2, right, -right, right * 2, -right * 2, up + right, up - right }
+    local dirs = { up, right, -right, (up + right).Unit, (up - right).Unit }
+    local offsets = {}
+    for _, dist in ipairs({ reach * 0.5, reach }) do
+        for _, d in ipairs(dirs) do offsets[#offsets + 1] = d * dist end
+    end
     for _, offset in ipairs(offsets) do
         local origin = eye + offset
         if not blocksHead(eye, { Position = origin, Parent = model }, myChar) then
@@ -1117,7 +1130,7 @@ track(RunService.RenderStepped:Connect(function()
                 local body = visiblePart(state.eye, model, myChar, BODY_PARTS)
                 local shift = nil
                 if not body and state.peek then
-                    body, shift = peekShot(state.eye, model, myChar, cam.CFrame.RightVector)
+                    body, shift = peekShot(state.eye, model, myChar, cam.CFrame.RightVector, state.peekReach)
                 end
                 if body then
                     state.part = body
